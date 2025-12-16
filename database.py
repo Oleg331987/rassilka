@@ -3,130 +3,67 @@ import os
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 import pytz
-from github import Github, Auth, GithubException
 
-class GitHubDatabase:
-    def __init__(self, github_token: str = None, repo_name: str = None):
-        self.github_token = github_token
-        self.repo_name = repo_name
-        self.users_data = None
-        self.stats_data = None
-        self.load_all_data()
+class SimpleDatabase:
+    def __init__(self):
+        self.users_file = "users.json"
+        self.stats_file = "statistics.json"
+        self.users_data = self.load_users()
+        self.stats_data = self.load_statistics()
     
-    def load_all_data(self):
-        """Загрузка всех данных"""
+    def load_users(self) -> Dict:
+        """Загрузка данных пользователей"""
         try:
-            self.users_data = self.load_from_source("users.json")
-            self.stats_data = self.load_from_source("statistics.json")
-        except Exception as e:
-            print(f"Ошибка загрузки данных: {e}")
-            # Создаем пустые структуры
-            self.users_data = {"users": {}, "last_broadcast": None}
-            self.stats_data = {
-                "periods": {},
-                "total": {
-                    "registered": 0,
-                    "questionnaires": 0,
-                    "broadcasts_sent": 0,
-                    "messages_received": 0,
-                    "feedback_received": 0,
-                    "active_users": 0
-                }
-            }
-    
-    def load_from_source(self, filename: str) -> Dict:
-        """Загрузка файла из GitHub или локально"""
-        # Сначала пробуем загрузить с GitHub
-        if self.github_token and self.repo_name:
-            try:
-                auth = Auth.Token(self.github_token)
-                g = Github(auth=auth)
-                repo = g.get_repo(self.repo_name)
-                file = repo.get_contents(filename)
-                content = file.decoded_content.decode('utf-8')
-                return json.loads(content)
-            except GithubException as e:
-                if e.status == 404:
-                    print(f"Файл {filename} не найден на GitHub, создаем локально")
-                else:
-                    print(f"Ошибка GitHub: {e}")
-        
-        # Если GitHub не работает, пробуем локальный файл
-        try:
-            if os.path.exists(filename):
-                with open(filename, 'r', encoding='utf-8') as f:
+            if os.path.exists(self.users_file):
+                with open(self.users_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
-        except Exception as e:
-            print(f"Ошибка загрузки локального файла {filename}: {e}")
-        
-        # Возвращаем пустую структуру
-        if filename == "users.json":
-            return {"users": {}, "last_broadcast": None}
-        elif filename == "statistics.json":
-            return {
-                "periods": {},
-                "total": {
-                    "registered": 0,
-                    "questionnaires": 0,
-                    "broadcasts_sent": 0,
-                    "messages_received": 0,
-                    "feedback_received": 0,
-                    "active_users": 0
-                }
-            }
+        except Exception:
+            pass
+        return {"users": {}, "last_broadcast": None}
     
-    def save_data(self, filename: str, data: Dict):
-        """Сохранение данных в GitHub и локально"""
-        # Сохраняем локально
-        try:
-            with open(filename, 'w', encoding='utf-8') as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            print(f"Ошибка сохранения локального файла {filename}: {e}")
-        
-        # Пробуем сохранить на GitHub
-        if self.github_token and self.repo_name:
-            try:
-                auth = Auth.Token(self.github_token)
-                g = Github(auth=auth)
-                repo = g.get_repo(self.repo_name)
-                content = json.dumps(data, ensure_ascii=False, indent=2)
-                
-                try:
-                    file = repo.get_contents(filename)
-                    repo.update_file(
-                        path=filename,
-                        message=f"Auto-update {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                        content=content,
-                        sha=file.sha
-                    )
-                except GithubException as e:
-                    if e.status == 404:
-                        repo.create_file(
-                            path=filename,
-                            message=f"Create {filename} {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-                            content=content
-                        )
-            except Exception as e:
-                print(f"Ошибка сохранения на GitHub {filename}: {e}")
-    
-    def save_users(self):
+    def save_users(self) -> None:
         """Сохранение данных пользователей"""
-        if self.users_data:
-            self.save_data("users.json", self.users_data)
+        try:
+            with open(self.users_file, 'w', encoding='utf-8') as f:
+                json.dump(self.users_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Ошибка сохранения пользователей: {e}")
     
-    def save_statistics(self):
+    def load_statistics(self) -> Dict:
+        """Загрузка статистики"""
+        try:
+            if os.path.exists(self.stats_file):
+                with open(self.stats_file, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {
+            "periods": {},
+            "total": {
+                "registered": 0,
+                "questionnaires": 0,
+                "broadcasts_sent": 0,
+                "messages_received": 0,
+                "feedback_received": 0,
+                "active_users": 0
+            }
+        }
+    
+    def save_statistics(self) -> None:
         """Сохранение статистики"""
-        if self.stats_data:
-            self.save_data("statistics.json", self.stats_data)
+        try:
+            with open(self.stats_file, 'w', encoding='utf-8') as f:
+                json.dump(self.stats_data, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            print(f"Ошибка сохранения статистики: {e}")
     
-    # Управление пользователями
+    # Остальные методы остаются такими же, как в предыдущей версии
+    # только удалите все вызовы GitHub
+    
     def add_user(self, user_id: int, username: str, first_name: str, last_name: str = ""):
         """Добавление нового пользователя"""
-        user_id_str = str(user_id)
-        
-        if user_id_str not in self.users_data["users"]:
-            self.users_data["users"][user_id_str] = {
+        if str(user_id) not in self.users_data["users"]:
+            self.users_data["users"][str(user_id)] = {
                 "username": username,
                 "first_name": first_name,
                 "last_name": last_name,
@@ -200,7 +137,6 @@ class GitHubDatabase:
         self.save_users()
         self.update_statistics("broadcasts_sent", len(user_ids))
     
-    # Статистика
     def update_statistics(self, metric: str, value: int = 1):
         """Обновление статистики"""
         if metric in self.stats_data["total"]:
@@ -244,7 +180,6 @@ class GitHubDatabase:
         start_date = self.get_period_start_date()
         return start_date + timedelta(days=13)
     
-    # Запросы
     def get_active_users(self, days: int = 14):
         """Получение активных пользователей"""
         active_users = []
