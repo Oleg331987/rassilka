@@ -7,10 +7,9 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import BOT_TOKEN, GITHUB_TOKEN, GITHUB_REPO, ADMIN_IDS
-from database import Database
+from config import BOT_TOKEN, GITHUB_TOKEN, GITHUB_REPO, ADMIN_IDS, COMPANY_INFO
+from database import GitHubDatabase
 from questionnaire import Questionnaire, QuestionnaireStates
-from scheduler import BroadcastScheduler
 from report_generator import ReportGenerator
 
 # Настройка логирования
@@ -23,9 +22,8 @@ logger = logging.getLogger(__name__)
 # Инициализация
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
-db = Database(github_token=GITHUB_TOKEN, repo_name=GITHUB_REPO)
+db = GitHubDatabase(github_token=GITHUB_TOKEN, repo_name=GITHUB_REPO)
 questionnaire = Questionnaire()
-scheduler = None
 
 # =========== КОМАНДЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ===========
 @dp.message(Command("start"))
@@ -357,15 +355,21 @@ async def cmd_admin_report(message: Message):
     
     # Генерируем отчет
     report_gen = ReportGenerator(db)
-    report = report_gen.generate_detailed_report()
+    period_id = db.get_current_period_id()
+    period_stats = db.get_period_statistics(period_id)
     
-    # Разбиваем на части если слишком длинный
-    if len(report) > 4000:
-        parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
-        for part in parts:
-            await message.answer(part)
+    if period_stats:
+        report = report_gen.generate_efficiency_report(period_id, period_stats)
+        
+        # Разбиваем на части если слишком длинный
+        if len(report) > 4000:
+            parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
+            for part in parts:
+                await message.answer(part)
+        else:
+            await message.answer(report)
     else:
-        await message.answer(report)
+        await message.answer("Нет данных для отчета за текущий период")
 
 @dp.message(Command("admin_users"))
 async def cmd_admin_users(message: Message):
@@ -400,25 +404,64 @@ async def cmd_admin_users(message: Message):
     
     await message.answer(response)
 
-@dp.message(Command("admin_broadcast"))
-async def cmd_admin_broadcast(message: Message):
-    """Тест рассылки для администратора"""
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("У вас нет прав для этой команды")
-        return
+# =========== ФУНКЦИИ ДЛЯ РАССЫЛКИ И ОТЧЕТОВ ===========
+async def send_broadcast_to_active_users():
+    """Рассылка информации активным пользователям"""
+    active_users = db.get_active_users(14)
+    user_ids = [user_id for user_id, _ in active_users]
     
-    await message.answer("📢 Отправляю тестовую рассылку...")
-    await scheduler.send_broadcast(days=365)  # Все пользователи за год
+    success_count = 0
+    failed_count = 0
+    
+    for user_id, user_data in active_users:
+        try:
+            await bot.send_message(
+                chat_id=user_id,
+                text=f"📢 Информация от ООО \"Тритика\"\n\n{COMPANY_INFO}"
+            )
+            success_count += 1
+            
+            # Небольшая задержка чтобы не превысить лимиты Telegram
+            await asyncio.sleep(0.1)
+            
+        except Exception as e:
+            print(f"Ошибка отправки пользователю {user_id}: {e}")
+            failed_count += 1
+    
+    print(f"Рассылка отправлена: {success_count} успешно, {failed_count} ошибок")
+    
+    # Записываем статистику рассылки
+    db.record_broadcast(user_ids)
+    
+    # Обновляем время последней рассылки
+    db.users_data["last_broadcast"] = datetime.now(pytz.UTC).isoformat()
+    db.save_users()
+    
+    return success_count, failed_count
 
-@dp.message(Command("admin_test_report"))
-async def cmd_admin_test_report(message: Message):
-    """Тест отчета эффективности"""
-    if message.from_user.id not in ADMIN_IDS:
-        await message.answer("У вас нет прав для этой команды")
+async def send_efficiency_report_to_admins():
+    """Отправка отчета эффективности администраторам"""
+    report_gen = ReportGenerator(db)
+    period_id = db.get_current_period_id()
+    period_stats = db.get_period_statistics(period_id)
+    
+    if not period_stats:
+        print("Нет данных для отчета за текущий период")
         return
     
-    await message.answer("📈 Тестирую отчет эффективности...")
-    await scheduler.send_efficiency_report()
+    # Генерируем отчет
+    report = report_gen.generate_efficiency_report(period_id, period_stats)
+    
+    # Отправляем администраторам
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                chat_id=admin_id,
+                text=report[:4000]  # Ограничение Telegram
+            )
+            print(f"Отчет эффективности отправлен администратору {admin_id}")
+        except Exception as e:
+            print(f"Ошибка отправки отчета администратору {admin_id}: {e}")
 
 # =========== ОБРАБОТКА ВСЕХ СООБЩЕНИЙ ===========
 @dp.message()
@@ -454,18 +497,10 @@ async def handle_all_messages(message: Message):
             )
 
 # =========== ЗАПУСК БОТА ===========
-async def main():
-    global scheduler
-    
-    # Инициализация планировщика
-    scheduler = BroadcastScheduler(bot, db)
-    scheduler.start()
-    
+async def start_bot():
+    """Запуск бота"""
     logger.info("Бот запущен")
     
     # Удаляем вебхук и запускаем polling
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
-
-if __name__ == "__main__":
-    asyncio.run(main())
