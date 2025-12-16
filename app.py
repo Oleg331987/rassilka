@@ -10,6 +10,9 @@ import logging
 from aiohttp import web
 import threading
 import time
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.cron import CronTrigger
+import pytz
 
 from bot_core import start_bot, send_broadcast_to_active_users, send_efficiency_report_to_admins
 from config import IS_RENDER
@@ -54,38 +57,78 @@ async def create_app():
     
     return app
 
-def run_bot():
-    """Запуск бота в отдельном потоке"""
-    logger.info("Starting bot...")
-    asyncio.run(start_bot())
+async def scheduled_broadcast():
+    """Запланированная рассылка"""
+    logger.info("Запуск запланированной рассылки...")
+    success, failed = await send_broadcast_to_active_users()
+    logger.info(f"Рассылка завершена: {success} успешно, {failed} ошибок")
 
-def run_web_server():
-    """Запуск веб-сервера"""
-    logger.info("Starting web server...")
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+async def scheduled_report():
+    """Запланированный отчет"""
+    logger.info("Запуск запланированного отчета...")
+    await send_efficiency_report_to_admins()
+    logger.info("Отчет отправлен")
+
+async def start_scheduler():
+    """Запуск планировщика"""
+    scheduler = AsyncIOScheduler(timezone=pytz.UTC)
     
-    app = loop.run_until_complete(create_app())
+    # Рассылка каждые 2 недели в понедельник в 10:00
+    scheduler.add_job(
+        scheduled_broadcast,
+        CronTrigger(day_of_week='mon', hour=10, minute=0),
+        kwargs={}
+    )
     
-    # Порт берем из переменной окружения или используем 8080
+    # Отчет каждые 2 недели в понедельник в 11:00
+    scheduler.add_job(
+        scheduled_report,
+        CronTrigger(day_of_week='mon', hour=11, minute=0),
+        kwargs={}
+    )
+    
+    scheduler.start()
+    logger.info("Планировщик запущен")
+    
+    # Бесконечный цикл чтобы планировщик работал
+    try:
+        while True:
+            await asyncio.sleep(3600)  # Спим час
+    except (KeyboardInterrupt, SystemExit):
+        scheduler.shutdown()
+
+async def run_all():
+    """Запуск всех компонентов"""
+    # Запускаем планировщик в фоне
+    scheduler_task = asyncio.create_task(start_scheduler())
+    
+    # Запускаем бота
+    bot_task = asyncio.create_task(start_bot())
+    
+    # Запускаем веб-сервер
+    app = await create_app()
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
     port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
     
-    web.run_app(app, port=port, host='0.0.0.0')
+    logger.info(f"Веб-сервер запущен на порту {port}")
+    
+    # Ждем завершения всех задач
+    await asyncio.gather(scheduler_task, bot_task)
 
 def main():
-    """Главная функция запуска"""
-    logger.info("Starting application...")
+    """Главная функция"""
+    logger.info("Запуск приложения...")
     
     if IS_RENDER:
-        logger.info("Running on Render.com")
-        
-        # На Render.com нужно запускать веб-сервер
-        # Бот будет запущен внутри веб-сервера
-        run_web_server()
+        logger.info("Работаем на Render.com со встроенным планировщиком")
+        asyncio.run(run_all())
     else:
-        # Локальный запуск - только бот
-        logger.info("Running locally")
-        run_bot()
+        logger.info("Локальный запуск")
+        asyncio.run(start_bot())
 
 if __name__ == "__main__":
     main()
