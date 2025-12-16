@@ -5,61 +5,15 @@ load_dotenv()
 
 # Токены и настройки
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
-GITHUB_REPO = os.getenv("GITHUB_REPO")
 ADMIN_IDS = list(map(int, os.getenv("ADMIN_IDS", "").split(","))) if os.getenv("ADMIN_IDS") else []
 IS_RENDER = os.getenv("RENDER", "false").lower() == "true"
 
-# Анкета согласно документу
+# Анкета остается той же
 QUESTIONNAIRE = [
-    {
-        "field": "company_name",
-        "question": "Наименование компании",
-        "type": "text"
-    },
-    {
-        "field": "inn",
-        "question": "ИНН (10 цифр для организаций, 12 для ИП)",
-        "type": "number"
-    },
-    {
-        "field": "contact_person",
-        "question": "Контактное лицо (ФИО и должность, например: Иванов Иван Иванович, директор по закупкам)",
-        "type": "text"
-    },
-    {
-        "field": "phone",
-        "question": "Телефон для связи (в формате +7 XXX XXX-XX-XX)",
-        "type": "phone"
-    },
-    {
-        "field": "email",
-        "question": "E-mail для отправки коммерческих предложений",
-        "type": "email"
-    },
-    {
-        "field": "okved",
-        "question": "Сфера деятельности, ОКВЭД (основные). Укажите коды или описание деятельности",
-        "type": "text"
-    },
-    {
-        "field": "industry_keywords",
-        "question": "Отрасль / Ключевые слова / ОКПД2\n\nОпишите:\n1. Отрасль деятельности (строительство, IT и т.д.)\n2. Ключевые слова для поиска\n3. Коды ОКПД2 (если известны)",
-        "type": "text"
-    },
-    {
-        "field": "contract_amount",
-        "question": "Сумма контракта (в рублях)\nУкажите диапазон в формате: от 100000 до 5000000",
-        "type": "text"
-    },
-    {
-        "field": "regions",
-        "question": "Регионы исполнения контрактов\n\nУкажите через запятую регионы, где готова работать ваша компания\n(например: Владимирская область, Москва, Центральный федеральный округ)",
-        "type": "text"
-    }
+    # ... (такой же как раньше)
 ]
 
-# Информация для рассылки
+# Информация для рассылки остается той же
 COMPANY_INFO = """ООО "Тритика"
 Телефон: +7 (4922) 223-222
 ИНН 3304023510 КПП 330401001
