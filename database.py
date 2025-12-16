@@ -57,9 +57,6 @@ class SimpleDatabase:
         except Exception as e:
             print(f"Ошибка сохранения статистики: {e}")
     
-    # Остальные методы остаются такими же, как в предыдущей версии
-    # только удалите все вызовы GitHub
-    
     def add_user(self, user_id: int, username: str, first_name: str, last_name: str = ""):
         """Добавление нового пользователя"""
         if str(user_id) not in self.users_data["users"]:
