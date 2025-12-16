@@ -117,7 +117,7 @@ class Questionnaire:
         report = self.generate_report(answers)
         
         # Сохраняем в базу данных
-        from bot import db
+        from bot_core import db
         db.save_questionnaire_answers(user_id, answers)
         
         # Сбрасываем состояние
