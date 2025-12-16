@@ -25,10 +25,9 @@ dp = Dispatcher(storage=MemoryStorage())
 db = GitHubDatabase(github_token=GITHUB_TOKEN, repo_name=GITHUB_REPO)
 questionnaire = Questionnaire()
 
-# =========== КОМАНДЫ ДЛЯ ПОЛЬЗОВАТЕЛЕЙ ===========
+# Команды для пользователей
 @dp.message(Command("start"))
 async def cmd_start(message: Message):
-    """Начало работы с ботом"""
     user = message.from_user
     db.add_user(user.id, user.username, user.first_name, user.last_name)
     db.update_activity(user.id)
@@ -48,19 +47,16 @@ async def cmd_start(message: Message):
 
 @dp.message(Command("questionnaire"))
 async def cmd_questionnaire(message: Message, state: FSMContext):
-    """Заполнение анкеты"""
     db.update_activity(message.from_user.id)
     await questionnaire.start_questionnaire(message, state)
 
 @dp.message(QuestionnaireStates.answering)
 async def handle_questionnaire_answer(message: Message, state: FSMContext):
-    """Обработка ответов анкеты"""
     db.update_activity(message.from_user.id)
     await questionnaire.handle_answer(message, state)
 
 @dp.message(Command("my_data"))
 async def cmd_my_data(message: Message):
-    """Просмотр своих данных"""
     user_id = message.from_user.id
     db.update_activity(user_id)
     
@@ -70,7 +66,6 @@ async def cmd_my_data(message: Message):
         await message.answer("Сначала используйте /start")
         return
     
-    # Основная информация
     last_activity = user_data["last_activity"][:19].replace("T", " ")
     created_at = user_data["first_seen"][:19].replace("T", " ")
     
@@ -89,7 +84,6 @@ async def cmd_my_data(message: Message):
         f"  • Оставлено отзывов: {user_data.get('feedback_count', 0)}\n"
     )
     
-    # Данные анкеты
     answers = user_data.get("questionnaire_answers", {})
     if answers:
         text += "\n📝 Данные последней анкеты:\n"
@@ -117,7 +111,6 @@ async def cmd_my_data(message: Message):
             completed_at = user_data["questionnaire_completed_at"][:19].replace("T", " ")
             text += f"\n📅 Дата заполнения: {completed_at}"
         
-        # Кнопка для просмотра полной анкеты
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
                 [InlineKeyboardButton(text="📋 Показать полную анкету", callback_data="show_full_questionnaire")],
@@ -132,7 +125,6 @@ async def cmd_my_data(message: Message):
 
 @dp.message(Command("feedback"))
 async def cmd_feedback(message: Message):
-    """Оставление отзыва"""
     db.update_activity(message.from_user.id)
     
     keyboard = InlineKeyboardMarkup(
@@ -153,7 +145,6 @@ async def cmd_feedback(message: Message):
 
 @dp.message(Command("settings"))
 async def cmd_settings(message: Message):
-    """Настройки бота"""
     db.update_activity(message.from_user.id)
     
     user_data = db.get_user(message.from_user.id)
@@ -184,7 +175,6 @@ async def cmd_settings(message: Message):
 
 @dp.message(Command("help"))
 async def cmd_help(message: Message):
-    """Помощь по боту"""
     db.update_activity(message.from_user.id)
     
     help_text = (
@@ -194,7 +184,7 @@ async def cmd_help(message: Message):
         "   Ответьте на 9 вопросов о вашей компании\n"
         "   Получите подборку подходящих тендеров\n\n"
         "2. ⚙️ Настройки:\n"
-        "   /settings - управление уведомлениями\n"
+        "   /settings - управление уведомлений\n"
         "   /my_data - просмотр вашей анкеты\n"
         "   /feedback - оставить отзыв\n\n"
         "3. 🔔 Уведомления:\n"
@@ -212,10 +202,9 @@ async def cmd_help(message: Message):
     
     await message.answer(help_text)
 
-# =========== КОЛЛБЭКИ ===========
+# Коллбэки
 @dp.callback_query(F.data == "show_full_questionnaire")
 async def show_full_questionnaire(callback: types.CallbackQuery):
-    """Показать полную анкету"""
     user_id = callback.from_user.id
     user_data = db.get_user(user_id)
     
@@ -226,7 +215,6 @@ async def show_full_questionnaire(callback: types.CallbackQuery):
     answers = user_data["questionnaire_answers"]
     report = questionnaire.generate_report(answers)
     
-    # Разбиваем на части если слишком длинное
     if len(report) > 4000:
         parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
         for part in parts:
@@ -238,13 +226,11 @@ async def show_full_questionnaire(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "new_questionnaire")
 async def new_questionnaire(callback: types.CallbackQuery, state: FSMContext):
-    """Начать новую анкету"""
     await cmd_questionnaire(callback.message, state)
     await callback.answer()
 
 @dp.callback_query(F.data == "toggle_notifications")
 async def toggle_notifications(callback: types.CallbackQuery):
-    """Переключить уведомления"""
     user_id = callback.from_user.id
     user_data = db.get_user(user_id)
     
@@ -267,14 +253,11 @@ async def toggle_notifications(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data.startswith("feedback_"))
 async def handle_feedback(callback: types.CallbackQuery):
-    """Обработка отзывов"""
     feedback_type = callback.data.replace("feedback_", "")
     user_id = callback.from_user.id
     
-    # Записываем отзыв
     db.record_feedback(user_id)
     
-    # Определяем текст ответа
     responses = {
         "excellent": "🎉 Спасибо за отличную оценку! Мы рады, что вам нравится наш сервис!",
         "good": "👍 Спасибо за хорошую оценку! Мы будем стараться еще лучше!",
@@ -296,27 +279,23 @@ async def handle_feedback(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "give_feedback")
 async def give_feedback_callback(callback: types.CallbackQuery):
-    """Оставить отзыв через кнопку"""
     await cmd_feedback(callback.message)
     await callback.answer()
 
 @dp.callback_query(F.data == "restart_questionnaire")
 async def restart_questionnaire_callback(callback: types.CallbackQuery, state: FSMContext):
-    """Перезапустить анкету"""
     await cmd_questionnaire(callback.message, state)
     await callback.answer()
 
-# =========== АДМИН КОМАНДЫ ===========
+# Админ команды
 @dp.message(Command("admin_stats"))
 async def cmd_admin_stats(message: Message):
-    """Статистика для администратора"""
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("У вас нет прав для этой команды")
         return
     
     db.update_activity(message.from_user.id)
     
-    # Общая статистика
     total_stats = db.stats_data["total"]
     activity_metrics = db.calculate_activity_metrics(14)
     
@@ -344,7 +323,6 @@ async def cmd_admin_stats(message: Message):
 
 @dp.message(Command("admin_report"))
 async def cmd_admin_report(message: Message):
-    """Подробный отчет для администратора"""
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("У вас нет прав для этой команды")
         return
@@ -353,7 +331,6 @@ async def cmd_admin_report(message: Message):
     
     await message.answer("📊 Формирую подробный отчет...")
     
-    # Генерируем отчет
     report_gen = ReportGenerator(db)
     period_id = db.get_current_period_id()
     period_stats = db.get_period_statistics(period_id)
@@ -361,7 +338,6 @@ async def cmd_admin_report(message: Message):
     if period_stats:
         report = report_gen.generate_efficiency_report(period_id, period_stats)
         
-        # Разбиваем на части если слишком длинный
         if len(report) > 4000:
             parts = [report[i:i+4000] for i in range(0, len(report), 4000)]
             for part in parts:
@@ -373,7 +349,6 @@ async def cmd_admin_report(message: Message):
 
 @dp.message(Command("admin_users"))
 async def cmd_admin_users(message: Message):
-    """Список пользователей для администратора"""
     if message.from_user.id not in ADMIN_IDS:
         await message.answer("У вас нет прав для этой команды")
         return
@@ -384,7 +359,6 @@ async def cmd_admin_users(message: Message):
     
     response = f"👥 Всего пользователей: {len(all_users)}\n\n"
     
-    # Показываем последних 10 пользователей
     recent_users = sorted(all_users, key=lambda x: x[1].get("first_seen", ""), reverse=True)[:10]
     
     for i, (user_id, user_data) in enumerate(recent_users, 1):
@@ -404,7 +378,34 @@ async def cmd_admin_users(message: Message):
     
     await message.answer(response)
 
-# =========== ФУНКЦИИ ДЛЯ РАССЫЛКИ И ОТЧЕТОВ ===========
+# Обработка всех сообщений
+@dp.message()
+async def handle_all_messages(message: Message):
+    user_id = message.from_user.id
+    
+    db.update_activity(user_id)
+    
+    user_data = db.get_user(user_id)
+    if not user_data:
+        user = message.from_user
+        db.add_user(user.id, user.username, user.first_name, user.last_name)
+    
+    if not message.text.startswith('/'):
+        if "отзыв" in message.text.lower() or "feedback" in message.text.lower():
+            db.record_feedback(user_id)
+            await message.answer(
+                "💬 Спасибо за ваш отзыв! Мы учтем ваши пожелания.\n\n"
+                "Для получения помощи используйте /help"
+            )
+        else:
+            await message.answer(
+                "Для поиска тендеров используйте команду /questionnaire\n"
+                "Для помощи - /help\n"
+                "Для просмотра ваших данных - /my_data\n"
+                "Для отзыва - /feedback"
+            )
+
+# Функции для рассылки
 async def send_broadcast_to_active_users():
     """Рассылка информации активным пользователям"""
     active_users = db.get_active_users(14)
@@ -420,20 +421,14 @@ async def send_broadcast_to_active_users():
                 text=f"📢 Информация от ООО \"Тритика\"\n\n{COMPANY_INFO}"
             )
             success_count += 1
-            
-            # Небольшая задержка чтобы не превысить лимиты Telegram
             await asyncio.sleep(0.1)
-            
         except Exception as e:
             print(f"Ошибка отправки пользователю {user_id}: {e}")
             failed_count += 1
     
     print(f"Рассылка отправлена: {success_count} успешно, {failed_count} ошибок")
-    
-    # Записываем статистику рассылки
     db.record_broadcast(user_ids)
     
-    # Обновляем время последней рассылки
     db.users_data["last_broadcast"] = datetime.now(pytz.UTC).isoformat()
     db.save_users()
     
@@ -449,58 +444,20 @@ async def send_efficiency_report_to_admins():
         print("Нет данных для отчета за текущий период")
         return
     
-    # Генерируем отчет
     report = report_gen.generate_efficiency_report(period_id, period_stats)
     
-    # Отправляем администраторам
     for admin_id in ADMIN_IDS:
         try:
             await bot.send_message(
                 chat_id=admin_id,
-                text=report[:4000]  # Ограничение Telegram
+                text=report[:4000]
             )
             print(f"Отчет эффективности отправлен администратору {admin_id}")
         except Exception as e:
             print(f"Ошибка отправки отчета администратору {admin_id}: {e}")
 
-# =========== ОБРАБОТКА ВСЕХ СООБЩЕНИЙ ===========
-@dp.message()
-async def handle_all_messages(message: Message):
-    """Обработка всех сообщений"""
-    user_id = message.from_user.id
-    
-    # Обновляем активность
-    db.update_activity(user_id)
-    
-    # Проверяем, есть ли пользователь в базе
-    user_data = db.get_user(user_id)
-    if not user_data:
-        # Если пользователь не зарегистрирован, регистрируем
-        user = message.from_user
-        db.add_user(user.id, user.username, user.first_name, user.last_name)
-    
-    # Если пользователь просто написал что-то без команды
-    if not message.text.startswith('/'):
-        # Проверяем, не является ли это отзывом
-        if "отзыв" in message.text.lower() or "feedback" in message.text.lower():
-            db.record_feedback(user_id)
-            await message.answer(
-                "💬 Спасибо за ваш отзыв! Мы учтем ваши пожелания.\n\n"
-                "Для получения помощи используйте /help"
-            )
-        else:
-            await message.answer(
-                "Для поиска тендеров используйте команду /questionnaire\n"
-                "Для помощи - /help\n"
-                "Для просмотра ваших данных - /my_data\n"
-                "Для отзыва - /feedback"
-            )
-
-# =========== ЗАПУСК БОТА ===========
+# Запуск бота
 async def start_bot():
-    """Запуск бота"""
     logger.info("Бот запущен")
-    
-    # Удаляем вебхук и запускаем polling
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
