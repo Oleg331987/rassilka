@@ -1,5 +1,4 @@
 services:
-  # Веб-сервис для бота
   - type: web
     name: tender-bot
     env: python
@@ -16,20 +15,5 @@ services:
         sync: false
       - key: RENDER
         value: true
-  
-  # Крон-задача для отчетов (запускается каждые 2 недели)
-  - type: cron
-    name: efficiency-report
-    schedule: "0 10 */14 * *"  # Каждые 14 дней в 10:00
-    env: python
-    buildCommand: pip install -r requirements.txt
-    startCommand: python scheduler_job.py
-    envVars:
-      - key: BOT_TOKEN
-        sync: false
-      - key: GITHUB_TOKEN
-        sync: false
-      - key: GITHUB_REPO
-        sync: false
-      - key: ADMIN_IDS
-        sync: false
+      - key: PYTHON_VERSION
+        value: 3.11.0
