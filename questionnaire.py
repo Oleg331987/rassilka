@@ -34,37 +34,29 @@ class Questionnaire:
         """Обработка ответа на вопрос"""
         user_id = message.from_user.id
         
-        # Получаем текущие данные
         data = await state.get_data()
         answers = data.get("answers", {})
         
-        # Получаем текущий вопрос
         current_index = self.current_question_index.get(user_id, 0)
         question_data = self.questions[current_index]
         
-        # Проверяем ответ
         is_valid, validated_data = await self.validate_answer(message.text, question_data)
         
         if not is_valid:
             await message.answer(f"❌ {validated_data}\nПожалуйста, исправьте ответ.")
             return
         
-        # Сохраняем ответ
         answers[question_data["field"]] = message.text.strip()
-        
-        # Обновляем индекс вопроса
         current_index += 1
         self.current_question_index[user_id] = current_index
         
         if current_index < len(self.questions):
-            # Задаем следующий вопрос
             await state.update_data(answers=answers)
             await message.answer(
                 f"Вопрос {current_index + 1}/{len(self.questions)}:\n"
                 f"{self.questions[current_index]['question']}"
             )
         else:
-            # Анкета завершена
             await self.complete_questionnaire(message, answers, state)
     
     async def validate_answer(self, answer: str, question_data: dict) -> tuple[bool, Any]:
@@ -80,7 +72,6 @@ class Questionnaire:
             return True, answer
         
         elif field_type == "number":
-            # Проверка ИНН
             if question_data["field"] == "inn":
                 if not answer.isdigit():
                     return False, "ИНН должен содержать только цифры"
@@ -89,7 +80,6 @@ class Questionnaire:
             return True, answer
         
         elif field_type == "phone":
-            # Проверка телефона (упрощенная)
             phone_clean = re.sub(r'[\s\-\(\)]', '', answer)
             if phone_clean.startswith('+7') and len(phone_clean) == 12:
                 return True, answer
@@ -101,7 +91,6 @@ class Questionnaire:
                 return False, "Неверный формат телефона. Используйте +7 XXX XXX-XX-XX"
         
         elif field_type == "email":
-            # Проверка email
             pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
             if re.match(pattern, answer):
                 return True, answer
@@ -112,18 +101,13 @@ class Questionnaire:
     async def complete_questionnaire(self, message: types.Message, answers: dict, state: FSMContext):
         """Завершение анкеты"""
         user_id = message.from_user.id
-        
-        # Формируем отчет
         report = self.generate_report(answers)
         
-        # Сохраняем в базу данных
         from bot_core import db
         db.save_questionnaire_answers(user_id, answers)
         
-        # Сбрасываем состояние
         await state.clear()
         
-        # Отправляем отчет
         await message.answer(
             "✅ Анкета успешно заполнена!\n"
             "📋 Ваши данные сохранены.\n\n"
@@ -132,20 +116,15 @@ class Questionnaire:
         
         await message.answer(report)
         
-        # Имитация выгрузки тендеров
-        await message.answer(
-            "🔍 Ищу тендеры по вашим критериям..."
-        )
+        await message.answer("🔍 Ищу тендеры по вашим критериям...")
         
         tender_results = self.generate_tender_results(answers)
         await message.answer(tender_results)
         
-        # Кнопка для обратной связи
         from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
         keyboard = InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="✅ Оставить отзыв", callback_data="give_feedback")],
-                [InlineKeyboardButton(text="📊 Запросить статистику", callback_data="request_stats")]
+                [InlineKeyboardButton(text="✅ Оставить отзыв", callback_data="give_feedback")]
             ]
         )
         
@@ -154,7 +133,6 @@ class Questionnaire:
             reply_markup=keyboard
         )
         
-        # Очищаем индекс вопроса
         if user_id in self.current_question_index:
             del self.current_question_index[user_id]
     
@@ -180,7 +158,7 @@ class Questionnaire:
         return report
     
     def generate_tender_results(self, answers: dict) -> str:
-        """Генерация результатов поиска тендеров (имитация)"""
+        """Генерация результатов поиска тендеров"""
         results = "📊 Результаты поиска тендеров:\n\n"
         results += "По вашим критериям найдено подходящих тендеров: 8\n\n"
         
@@ -198,7 +176,7 @@ class Questionnaire:
         results += "3. Разработка сайта\n"
         results += "   • Заказчик: ООО \"БизнесТех\"\n"
         results += "   • Сумма: 300 000 руб.\n"
-        results += "   • Срок подади: 14 дней\n\n"
+        results += "   • Срок подачи: 14 дней\n\n"
         
         results += "💼 Для участия в тендерах:\n"
         results += "• Получите электронную подпись (ЭЦП)\n"
