@@ -2,14 +2,10 @@ services:
   - type: web
     name: tender-bot
     env: python
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install --upgrade pip && pip install -r requirements.txt
     startCommand: python app.py
     envVars:
       - key: BOT_TOKEN
-        sync: false
-      - key: GITHUB_TOKEN
-        sync: false
-      - key: GITHUB_REPO
         sync: false
       - key: ADMIN_IDS
         sync: false
