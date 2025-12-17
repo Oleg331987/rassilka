@@ -8,12 +8,15 @@ from aiogram.filters import Command, StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    ReplyKeyboardMarkup, 
+    KeyboardButton, 
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton,
+    ReplyKeyboardRemove
+)
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-from background import keep_alive
 
 # Настройка логирования
 logging.basicConfig(
@@ -24,23 +27,36 @@ logger = logging.getLogger(__name__)
 
 # Получаем токен и ID админа
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_IDS = [int(id.strip()) for id in os.getenv("ADMIN_IDS", "").split(",") if id.strip()]
+ADMIN_ID = os.getenv("ADMIN_ID")
 
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN не установлен! Добавьте его в Secrets.")
-    exit(1)
+    logger.error("❌ BOT_TOKEN не установлен! Добавьте в Secrets.")
+    BOT_TOKEN = input("Введите BOT_TOKEN: ").strip()
+    if not BOT_TOKEN:
+        exit(1)
+
+if not ADMIN_ID:
+    logger.error("❌ ADMIN_ID не установлен! Добавьте в Secrets.")
+    ADMIN_ID = input("Введите ваш Telegram ID: ").strip()
+    if not ADMIN_ID:
+        exit(1)
+
+ADMIN_ID = int(ADMIN_ID)
 
 # Инициализация бота
-bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+bot = Bot(
+    token=BOT_TOKEN,
+    default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
-scheduler = AsyncIOScheduler()
 
 # Инициализация базы данных
 def init_db():
-    conn = sqlite3.connect('tenders.db')
+    conn = sqlite3.connect('tenders.db', check_same_thread=False)
     cursor = conn.cursor()
     
+    # Таблица анкет
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS questionnaires (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -56,25 +72,38 @@ def init_db():
         industry TEXT,
         contract_amount TEXT,
         regions TEXT,
-        status TEXT DEFAULT 'processing',
+        status TEXT DEFAULT 'new',
         created_at TEXT,
-        updated_at TEXT,
         admin_comment TEXT
     )
     ''')
     
+    # Таблица сообщений (общение клиент-админ)
     cursor.execute('''
-    CREATE TABLE IF NOT EXISTS newsletter_subscribers (
+    CREATE TABLE IF NOT EXISTS messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER UNIQUE,
-        username TEXT,
-        subscribed_at TEXT
+        from_id INTEGER,
+        to_id INTEGER,
+        message_text TEXT,
+        created_at TEXT
+    )
+    ''')
+    
+    # Таблица отправленных файлов
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS sent_files (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        questionnaire_id INTEGER,
+        file_name TEXT,
+        sent_by INTEGER,
+        sent_at TEXT
     )
     ''')
     
     conn.commit()
     conn.close()
 
+# Инициализируем БД
 init_db()
 
 # =========== СОСТОЯНИЯ ===========
@@ -90,47 +119,557 @@ class Questionnaire(StatesGroup):
     waiting_for_amount = State()
     waiting_for_regions = State()
 
-class AdminTender(StatesGroup):
+class AdminAction(StatesGroup):
     waiting_for_user_id = State()
-    waiting_for_tender_title = State()
-    waiting_for_tender_description = State()
-    waiting_for_tender_link = State()
-    waiting_for_tender_amount = State()
-    waiting_for_tender_deadline = State()
+    waiting_for_file = State()
+    waiting_for_message = State()
 
-# =========== ТЕКСТЫ ДЛЯ БОТА ===========
-RESPONSE_TEMPLATES = {
-    "request_received": """
-✅ <b>Запрос получен!</b>
+# =========== КЛАВИАТУРЫ ===========
+def get_main_keyboard():
+    """Главное меню для пользователей"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📝 Заполнить анкету")],
+            [KeyboardButton(text="📨 Написать менеджеру")],
+            [KeyboardButton(text="ℹ️ О компании")],
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие"
+    )
+    return keyboard
 
-Благодарим вас за обращение в наш сервис. Мы уже начали поиск тендеров по вашим параметрам.
+def get_admin_keyboard():
+    """Клавиатура администратора"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Все заявки"), KeyboardButton(text="🆕 Новые заявки")],
+            [KeyboardButton(text="📁 Отправить файл клиенту"), KeyboardButton(text="💬 Написать клиенту")],
+            [KeyboardButton(text="📋 Статистика"), KeyboardButton(text="🏠 Главное меню")],
+        ],
+        resize_keyboard=True
+    )
+    return keyboard
 
-Обработка запроса и формирование персональной подборки займет не более 1-го часа.
+def get_cancel_keyboard():
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отменить")]],
+        resize_keyboard=True
+    )
+    return keyboard
 
-Как только выгрузка будет готова, мы пришлем ее в этот чат.
+# =========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===========
+def save_questionnaire_to_db(user_data):
+    """Сохраняем анкету в базу данных"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO questionnaires 
+        (user_id, username, full_name, company_name, inn, contact_person, phone, email, 
+         activity_sphere, industry, contract_amount, regions, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_data['user_id'],
+            user_data['username'],
+            user_data['full_name'],
+            user_data['company_name'],
+            user_data['inn'],
+            user_data['contact_person'],
+            user_data['phone'],
+            user_data['email'],
+            user_data['activity_sphere'],
+            user_data['industry'],
+            user_data['contract_amount'],
+            user_data['regions'],
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        
+        conn.commit()
+        questionnaire_id = cursor.lastrowid
+        conn.close()
+        
+        return questionnaire_id
+    except Exception as e:
+        logger.error(f"Ошибка сохранения в БД: {e}")
+        return None
 
-<b>Следите за обновлениями!</b>
-—
-Всегда на связи, команда ТРИТИКА.
-Телефон: +7 (904) 653-69-87
-Сайт: https://tritika.ru/
-E-mail: info@tritika.ru
-""",
+def get_questionnaires(status=None):
+    """Получаем заявки из базы"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        if status:
+            cursor.execute("SELECT * FROM questionnaires WHERE status = ? ORDER BY created_at DESC", (status,))
+        else:
+            cursor.execute("SELECT * FROM questionnaires ORDER BY created_at DESC")
+        
+        questionnaires = cursor.fetchall()
+        conn.close()
+        return questionnaires
+    except Exception as e:
+        logger.error(f"Ошибка получения заявок: {e}")
+        return []
+
+def get_questionnaire_by_user_id(user_id):
+    """Получаем последнюю анкету пользователя"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", 
+            (user_id,)
+        )
+        questionnaire = cursor.fetchone()
+        conn.close()
+        return questionnaire
+    except Exception as e:
+        logger.error(f"Ошибка получения анкеты: {e}")
+        return None
+
+def update_questionnaire_status(questionnaire_id, status):
+    """Обновляем статус анкеты"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE questionnaires SET status = ? WHERE id = ?",
+            (status, questionnaire_id)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка обновления статуса: {e}")
+        return False
+
+def save_message_to_db(from_id, to_id, message_text):
+    """Сохраняем сообщение в базу"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO messages (from_id, to_id, message_text, created_at) VALUES (?, ?, ?, ?)",
+            (from_id, to_id, message_text, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения сообщения: {e}")
+        return False
+
+# =========== ОБРАБОТЧИКИ КОМАНД ===========
+@dp.message(Command("start"))
+async def cmd_start(message: types.Message):
+    """Обработка команды /start"""
+    if message.from_user.id == ADMIN_ID:
+        await message.answer(
+            "👑 <b>Панель администратора</b>\n\n"
+            "Добро пожаловать в админ-панель!\n\n"
+            "Доступные функции:\n"
+            "• 📊 Все заявки - просмотр всех анкет\n"
+            "• 🆕 Новые заявки - только новые заявки\n"
+            "• 📁 Отправить файл - отправить выгрузку клиенту\n"
+            "• 💬 Написать клиенту - отправить сообщение\n"
+            "• 📋 Статистика - статистика работы\n\n"
+            "Используйте кнопки ниже:",
+            reply_markup=get_admin_keyboard()
+        )
+    else:
+        await message.answer(
+            "🏢 <b>Добро пожаловать в бот ООО 'Тритика'!</b>\n\n"
+            "Мы помогаем находить выгодные тендеры для вашего бизнеса.\n\n"
+            "<b>Наши услуги:</b>\n"
+            "• Поиск тендеров по вашим параметрам\n"
+            "• Персональная выгрузка в течение часа\n"
+            "• Консультации по участию\n"
+            "• Сопровождение сделок\n\n"
+            "Нажмите <b>'📝 Заполнить анкету'</b> чтобы начать!",
+            reply_markup=get_main_keyboard()
+        )
+
+@dp.message(F.text == "🏠 Главное меню")
+async def main_menu(message: types.Message):
+    """Главное меню"""
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Главное меню администратора:", reply_markup=get_admin_keyboard())
+    else:
+        await message.answer("Главное меню:", reply_markup=get_main_keyboard())
+
+# =========== ЗАПОЛНЕНИЕ АНКЕТЫ (ПОЛЬЗОВАТЕЛЬ) ===========
+@dp.message(F.text == "📝 Заполнить анкету")
+async def start_questionnaire(message: types.Message, state: FSMContext):
+    """Начало заполнения анкеты"""
+    # Проверяем, не заполняется ли уже анкета
+    current_state = await state.get_state()
+    if current_state:
+        await message.answer("Вы уже заполняете анкету. Продолжайте или отмените.")
+        return
     
-    "tender_export": """
+    await message.answer(
+        "📋 <b>Начинаем заполнение анкеты!</b>\n\n"
+        "Заполнение займет 2-3 минуты.\n\n"
+        "<b>Введите ваше ФИО:</b>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_name)
+
+@dp.message(Questionnaire.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    await state.update_data(full_name=message.text)
+    await message.answer(
+        "✅ <b>ФИО сохранено</b>\n\n"
+        "<b>Введите название вашей компании:</b>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_company)
+
+@dp.message(Questionnaire.waiting_for_company)
+async def process_company(message: types.Message, state: FSMContext):
+    await state.update_data(company_name=message.text)
+    await message.answer(
+        "✅ <b>Название компании сохранено</b>\n\n"
+        "<b>Введите ИНН компании:</b>\n"
+        "<i>10 или 12 цифр</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_inn)
+
+@dp.message(Questionnaire.waiting_for_inn)
+async def process_inn(message: types.Message, state: FSMContext):
+    inn = message.text.strip()
+    if not inn.isdigit() or len(inn) not in [10, 12]:
+        await message.answer("❌ ИНН должен содержать 10 или 12 цифр. Введите снова:")
+        return
+    
+    await state.update_data(inn=inn)
+    await message.answer(
+        "✅ <b>ИНН сохранен</b>\n\n"
+        "<b>Введите контактное лицо для связи:</b>\n"
+        "<i>Кто будет общаться по тендерам</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_contact)
+
+@dp.message(Questionnaire.waiting_for_contact)
+async def process_contact(message: types.Message, state: FSMContext):
+    await state.update_data(contact_person=message.text)
+    await message.answer(
+        "✅ <b>Контактное лицо сохранено</b>\n\n"
+        "<b>Введите телефон для связи:</b>\n"
+        "<i>Например: +7 999 123-45-67</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_phone)
+
+@dp.message(Questionnaire.waiting_for_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    await state.update_data(phone=message.text)
+    await message.answer(
+        "✅ <b>Телефон сохранен</b>\n\n"
+        "<b>Введите email:</b>\n"
+        "<i>На этот адрес придет выгрузка</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_email)
+
+@dp.message(Questionnaire.waiting_for_email)
+async def process_email(message: types.Message, state: FSMContext):
+    email = message.text.strip()
+    if "@" not in email or "." not in email:
+        await message.answer("❌ Введите корректный email адрес:")
+        return
+    
+    await state.update_data(email=email)
+    await message.answer(
+        "✅ <b>Email сохранен</b>\n\n"
+        "<b>Введите сферу деятельности:</b>\n"
+        "<i>Например: Строительство, ОКВЭД 41.20</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_activity)
+
+@dp.message(Questionnaire.waiting_for_activity)
+async def process_activity(message: types.Message, state: FSMContext):
+    await state.update_data(activity_sphere=message.text)
+    await message.answer(
+        "✅ <b>Сфера деятельности сохранена</b>\n\n"
+        "<b>Введите ключевые слова для поиска:</b>\n"
+        "<i>Чем занимается ваша компания (через запятую)</i>\n"
+        "<i>Пример: строительство, ремонт, отделка</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_industry)
+
+@dp.message(Questionnaire.waiting_for_industry)
+async def process_industry(message: types.Message, state: FSMContext):
+    await state.update_data(industry=message.text)
+    await message.answer(
+        "✅ <b>Ключевые слова сохранены</b>\n\n"
+        "<b>Введите желаемый бюджет контрактов:</b>\n"
+        "<i>Пример: от 100 000 до 500 000 рублей</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_amount)
+
+@dp.message(Questionnaire.waiting_for_amount)
+async def process_amount(message: types.Message, state: FSMContext):
+    await state.update_data(contract_amount=message.text)
+    await message.answer(
+        "✅ <b>Бюджет сохранен</b>\n\n"
+        "<b>Введите регионы работы:</b>\n"
+        "<i>В каких регионах готовы работать (через запятую)</i>\n"
+        "<i>Пример: Москва, Московская область, Владимир</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_regions)
+
+@dp.message(Questionnaire.waiting_for_regions)
+async def process_regions(message: types.Message, state: FSMContext):
+    """Завершение заполнения анкеты"""
+    user_data = await state.get_data()
+    
+    # Добавляем информацию о пользователе
+    user_data['user_id'] = message.from_user.id
+    user_data['username'] = message.from_user.username or "Не указан"
+    user_data['regions'] = message.text
+    
+    # Сохраняем в базу данных
+    questionnaire_id = save_questionnaire_to_db(user_data)
+    
+    if questionnaire_id:
+        # Отправляем подтверждение пользователю
+        await message.answer(
+            "✅ <b>Запрос получен!</b>\n\n"
+            "Благодарим вас за обращение в наш сервис. Мы уже начали поиск тендеров по вашим параметрам.\n\n"
+            "Обработка запроса и формирование персональной подборки займет не более 1-го часа.\n"
+            "Как только выгрузка будет готова, мы пришлем ее в этот чат.\n\n"
+            "<b>Следите за обновлениями!</b>\n"
+            "—\n"
+            "Всегда на связи, команда ТРИТИКА.\n"
+            "Телефон: +7 (904) 653-69-87\n"
+            "Сайт: https://tritika.ru/\n"
+            "E-mail: info@tritika.ru",
+            reply_markup=get_main_keyboard()
+        )
+        
+        # Отправляем уведомление админу
+        admin_message = f"""
+        🆕 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
+        
+        <b>👤 Данные клиента:</b>
+        • ID пользователя: {user_data['user_id']}
+        • Username: @{user_data['username']}
+        • ФИО: {user_data['full_name']}
+        • Компания: {user_data['company_name']}
+        • ИНН: {user_data['inn']}
+        • Контакт: {user_data['contact_person']}
+        • Телефон: {user_data['phone']}
+        • Email: {user_data['email']}
+        
+        <b>📊 Параметры поиска:</b>
+        • Сфера: {user_data['activity_sphere']}
+        • Ключевые слова: {user_data['industry']}
+        • Бюджет: {user_data['contract_amount']}
+        • Регионы: {user_data['regions']}
+        
+        <b>⏰ Время подачи:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+        
+        <i>Для отправки файла используйте кнопку "📁 Отправить файл клиенту" или команду /send_file_{user_data['user_id']}</i>
+        """
+        
+        try:
+            await bot.send_message(ADMIN_ID, admin_message)
+            logger.info(f"✅ Анкета #{questionnaire_id} отправлена админу")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки админу: {e}")
+    else:
+        await message.answer(
+            "❌ Произошла ошибка при сохранении анкеты. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+    
+    await state.clear()
+
+# =========== АДМИН: ПРОСМОТР ЗАЯВОК ===========
+@dp.message(F.text == "📊 Все заявки")
+async def admin_all_requests(message: types.Message):
+    """Показываем все заявки админу"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    questionnaires = get_questionnaires()
+    
+    if not questionnaires:
+        await message.answer("📭 Заявок пока нет.", reply_markup=get_admin_keyboard())
+        return
+    
+    response = "📊 <b>Все заявки:</b>\n\n"
+    
+    for q in questionnaires[:10]:  # Ограничиваем 10 заявками
+        status_icon = "🆕" if q[13] == "new" else "✅" if q[13] == "processed" else "📁"
+        response += f"""
+        <b>#{q[0]}</b> - {q[3]} ({q[4]})
+        👤 ID: {q[1]} | @{q[2]}
+        📅 {q[14][:10]}
+        {status_icon} Статус: {q[13]}
+        ──────────────────────
+        """
+    
+    if len(questionnaires) > 10:
+        response += f"\n... и еще {len(questionnaires) - 10} заявок"
+    
+    response += "\n\nДля отправки файла: /send_file_ID"
+    await message.answer(response, reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "🆕 Новые заявки")
+async def admin_new_requests(message: types.Message):
+    """Показываем только новые заявки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    questionnaires = get_questionnaires("new")
+    
+    if not questionnaires:
+        await message.answer("🆕 Новых заявок нет.", reply_markup=get_admin_keyboard())
+        return
+    
+    response = "🆕 <b>Новые заявки:</b>\n\n"
+    
+    for q in questionnaires:
+        response += f"""
+        <b>#{q[0]}</b> - {q[3]}
+        👤 ID: {q[1]} | @{q[2]}
+        📞 Телефон: {q[7]}
+        📧 Email: {q[8]}
+        📅 {q[14][:16]}
+        
+        Для отправки файла: /send_file_{q[1]}
+        ──────────────────────
+        """
+    
+    await message.answer(response, reply_markup=get_admin_keyboard())
+
+# =========== АДМИН: ОТПРАВКА ФАЙЛА ===========
+@dp.message(F.text == "📁 Отправить файл клиенту")
+async def admin_send_file_start(message: types.Message, state: FSMContext):
+    """Начало отправки файла"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    await message.answer(
+        "📁 <b>Отправка файла клиенту</b>\n\n"
+        "Введите ID пользователя для отправки файла:",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(AdminAction.waiting_for_user_id)
+
+@dp.message(AdminAction.waiting_for_user_id)
+async def admin_get_file_user_id(message: types.Message, state: FSMContext):
+    """Получаем ID пользователя для отправки файла"""
+    try:
+        user_id = int(message.text)
+        await state.update_data(target_user_id=user_id)
+        
+        # Получаем информацию о пользователе
+        questionnaire = get_questionnaire_by_user_id(user_id)
+        
+        if questionnaire:
+            await message.answer(
+                f"✅ Найден пользователь:\n"
+                f"👤 ФИО: {questionnaire[3]}\n"
+                f"🏢 Компания: {questionnaire[4]}\n\n"
+                f"Теперь отправьте файл (PDF, Word, Excel или архив):"
+            )
+        else:
+            await message.answer(
+                f"👤 Пользователь найден (ID: {user_id})\n\n"
+                f"Теперь отправьте файл (PDF, Word, Excel или архив):"
+            )
+        
+        await state.set_state(AdminAction.waiting_for_file)
+    except ValueError:
+        await message.answer("❌ Введите корректный ID (число):")
+
+@dp.message(AdminAction.waiting_for_file, F.document | F.photo)
+async def admin_send_file_to_user(message: types.Message, state: FSMContext):
+    """Админ отправляет файл пользователю"""
+    data = await state.get_data()
+    user_id = data['target_user_id']
+    
+    try:
+        # Отправляем файл пользователю
+        if message.document:
+            await bot.send_document(
+                user_id,
+                document=message.document.file_id,
+                caption=f"""
+                ✅ <b>Ваша персональная подборка готова!</b>
+
+                Во вложении вы найдете файл с детальной выгрузкой тендеров, соответствующих вашим критериям.
+
+                📎 <b>Файл: {message.document.file_name}</b>
+                👉 Если возникнут вопросы по конкретным тендерам — обращайтесь!
+
+                С уважением, команда ТРИТИКА.
+                https://tritika.ru/
+                """
+            )
+            file_name = message.document.file_name
+        elif message.photo:
+            await bot.send_photo(
+                user_id,
+                photo=message.photo[-1].file_id,
+                caption=f"""
+                ✅ <b>Ваша персональная подборка готова!</b>
+
+                В приложении вы найдете выгрузку тендеров, соответствующих вашим критериям.
+
+                👉 Если возникнут вопросы по конкретным тендерам — обращайтесь!
+
+                С уважением, команда ТРИТИКА.
+                https://tritika.ru/
+                """
+            )
+            file_name = "photo.jpg"
+        
+        # Обновляем статус анкеты
+        questionnaire = get_questionnaire_by_user_id(user_id)
+        if questionnaire:
+            update_questionnaire_status(questionnaire[0], "processed")
+        
+        # Сохраняем информацию о отправке
+        try:
+            conn = sqlite3.connect('tenders.db', check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO sent_files (questionnaire_id, file_name, sent_by, sent_at) VALUES (?, ?, ?, ?)",
+                (questionnaire[0] if questionnaire else None, file_name, message.from_user.id, 
+                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+            )
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Ошибка сохранения информации о файле: {e}")
+        
+        # Отправляем текстовую выгрузку
+        if questionnaire:
+            tender_export = f"""
 📄 <b>ВЫГРУЗКА ТЕНДЕРОВ | ТРИТИКА</b>
 
 *Сформировано для вас на основе запроса.
 ————————————————
 👤 <b>ДАННЫЕ КЛИЕНТА:</b>
-• Запрос от: {full_name}
-• Сфера: {activity_sphere}
-• Регион поиска: {regions}
-• Ключевые слова: {industry}
-• Время запроса: {created_at}
+• Запрос от: {questionnaire[3]}
+• Сфера: {questionnaire[9]}
+• Регион поиска: {questionnaire[12]}
+• Ключевые слова: {questionnaire[10]}
+• Время запроса: {questionnaire[14]}
 ————————————————
 📊 <b>РЕЗУЛЬТАТЫ ПОИСКА:</b>
-Найдено потенциально подходящих торгов: {tender_count}
+Найдено потенциально подходящих торгов: 5+
 ————————————————
 💡 <b>ВАЖНО:</b>
 • Данная подборка сформирована автоматически и носит информационный характер.
@@ -142,643 +681,279 @@ E-mail: info@tritika.ru
 
 С уважением, команда ТРИТИКА.
 https://tritika.ru/
-""",
-    
-    "file_sent": """
-✅ <b>Ваша персональная подборка готова!</b>
-
-Во вложении вы найдете файл с детальной выгрузкой тендеров, соответствующих вашим критериям.
-
-📎 <b>Файл: {filename}</b>
-👉 Если возникнут вопросы по конкретным тендерам — обращайтесь!
-""",
-    
-    "no_tenders_found": """
-🔍 <b>РЕЗУЛЬТАТЫ ПОИСКА</b>
-
-К сожалению, по вашим текущим параметрам ({activity_sphere}, {regions}, {industry}) в системе Seldon на данный момент не найдено активных торгов.
-
-<b>Возможные причины и рекомендации:</b>
-1. Слишком узкие критерии поиска — попробуйте расширить регион или ключевые слова.
-2. Сезонный спад активности в вашей сфере.
-3. Торги еще не опубликованы, но могут появиться в ближайшие дни.
-
-<b>Что можно сделать:</b>
-• Расширить критерии поиска (например, добавить смежные отрасли).
-• Ознакомиться с архивом завершенных торгов для анализа рынка.
-
-Спасибо, что пользуетесь нашим сервисом!
-"""
-}
-
-# =========== РАССЫЛКИ (из вашего файла) ===========
-NEWSLETTERS = [
-    {
-        "title": "Самые частые причины отклонения заявок на участие в госзакупках",
-        "content": """
-🏛️ <b>Самые частые причины отклонения заявок на участие в госзакупках</b>
-
-Как эксперты в сфере тендеров, мы ежедневно сталкиваемся с ситуациями, когда компании не допускаются к участию из-за простых ошибок. 
-
-<b>Основные причины отказов:</b>
-1. <b>Неполный пакет документов</b> – отсутствие необходимых лицензий или выписок
-2. <b>Некорректное заполнение форм</b> – опечатки в реквизитах, неверные суммы
-3. <b>Нарушение сроков подачи</b> – даже минута опоздания может стать фатальной
-4. <b>Несоответствие требованиям ТЗ</b> – формальные расхождения в спецификациях
-
-<b>Наша рекомендация:</b> Проведите аудит своей заявки перед отправкой или доверьте это профессионалам.
-
-💡 <b>Нужна проверка вашей следующей заявки?</b> Ответьте «Проверка» — поможем бесплатно!
-        """
-    },
-    {
-        "title": "ТОП-5 мифов о работе с государственными закупками",
-        "content": """
-🎯 <b>ТОП-5 мифов о работе с государственными закупками</b>
-
-Развеиваем популярные заблуждения, которые мешают бизнесу участвовать в тендерах:
-
-<b>Миф 1:</b> «Тендерами занимаются только крупные компании»
-<b>Реальность:</b> 44% победителей – малый и средний бизнес.
-
-<b>Миф 2:</b> «Нужны большие деньги на обеспечение заявки»
-<b>Реальность:</b> Существуют банковские гарантии и другие инструменты.
-
-<b>Миф 3:</b> «Все тендеры уже «схвачены» заранее»
-<b>Реальность:</b> 80% конкурсов проходят в честной борьбе.
-
-<b>Миф 4:</b> «Процесс участия слишком сложный»
-<b>Реальность:</b> При правильном сопровождении – это стандартная процедура.
-
-<b>Миф 5:</b> «Мой бизнес слишком специфический для тендеров»
-<b>Реальность:</b> Государство закупает абсолютно всё – от канцтоваров до IT-решений.
-
-📞 <b>Есть вопросы по участию?</b> Пишите – проконсультируем!
-        """
-    },
-    {
-        "title": "Эффективные инструменты мониторинга государственных закупок",
-        "content": """
-🔍 <b>Эффективные инструменты мониторинга государственных закупок</b>
-
-Самостоятельный поиск тендеров может отнимать до 15 часов в неделю. Рассказываем, как оптимизировать этот процесс:
-
-<b>1. Специализированные площадки:</b>
-• Сбербанк-АСТ, ЕЭТП, РТС-тендер
-• Автоматические фильтры по вашим критериям
-
-<b>2. Системы аналитики:</b>
-• Контур.Закупки, СБИС Тендеры
-• Отслеживание изменений в документации
-
-<b>3. Наши рекомендации:</b>
-• Настройте уведомления по ключевым словам
-• Отслеживайте конкретных заказчиков
-• Анализируйте историю закупок конкурентов
-
-<b>Наш сервис делает это автоматически:</b> Мы ежедневно мониторим 50+ площадок и присылаем только релевантные предложения.
-
-🚀 <b>Хотите получать персонализированные подборки?</b> Ответьте «Подборка» на это сообщение.
-        """
-    },
-    {
-        "title": "Юридический ликбез: что надо знать перед подачей жалобы в ФАС?",
-        "content": """
-⚖️ <b>Юридический ликбез: что надо знать перед подачей жалобы в ФАС?</b>
-
-Подача жалобы в Федеральную антимонопольную службу – серьезный шаг. Вот что нужно знать:
-
-<b>Основания для жалобы:</b>
-1. Нарушение процедуры проведения закупки
-2. Дискриминационные требования в документации
-3. Необоснованное отклонение заявки
-
-<b>Сроки:</b>
-• Жалоба подается в течение 10 дней с момента нарушения
-• Рассмотрение занимает до 5 рабочих дней
-
-<b>Типичные ошибки:</b>
-• Отсутствие доказательной базы
-• Пропуск сроков подачи
-• Некорректное оформление документов
-
-<b>Наша практика:</b> В 73% случаев правильная жалоба приводит к пересмотру условий или восстановлению в процедуре.
-
-🛡️ <b>Столкнулись с нарушениями?</b> Пришлите документацию – оценим шансы на успешное обжалование.
-        """
-    },
-    {
-        "title": "Какие изменения ожидают рынок госзакупок в следующем квартале?",
-        "content": """
-📈 <b>Какие изменения ожидают рынок госзакупок в следующем квартале?</b>
-
-Анализируем тренды и готовимся к изменениям вместе с вами:
-
-<b>1. Цифровизация:</b>
-• Расширение применения электронных аккредитивов
-• Внедрение блокчейн-технологий для контрактов
-
-<b>2. Упрощение процедур:</b>
-• Сокращение списка обязательных документов для МСП
-• Расширение практики запроса котировок
-
-<b>3. Новые требования:</b>
-• Ужесточение контроля за субподрядчиками
-• Обязательная экологическая отчетность
-
-<b>4. Наши прогнозы:</b>
-• Рост количества закупок у единственного поставщика
-• Увеличение доли IT-тендеров на 15-20%
-
-📊 <b>Хотите получать регулярные обзоры рынка?</b> Подпишитесь на нашу аналитическую рассылку – ответьте «Аналитика».
-        """
-    },
-    {
-        "title": "Практическое руководство: Как увеличить шансы на победу в конкурсе?",
-        "content": """
-🏆 <b>Практическое руководство: Как увеличить шансы на победу в конкурсе?</b>
-
-На основе 100+ успешных кейсов делимся практическими советами:
-
-<b>Этап 1: Подготовка (70% успеха)</b>
-• Тщательный анализ ТЗ на предмет «подводных камней»
-• Изучение заказчика и его предыдущих закупок
-• Расчет реальной стоимости работ с учетом рисков
-
-<b>Этап 2: Подача заявки</b>
-• Тройная проверка всех документов
-• Подготовка убедительного технического предложения
-• Грамотное оформление финансовой части
-
-<b>Этап 3: Подведение итогов</b>
-• Мониторинг хода процедуры
-• Готовность к запросам разъяснений
-• Анализ результатов для будущих тендеров
-
-<b>Наш опыт:</b> При комплексном сопровождении шансы на победу увеличиваются в 3-4 раза.
-
-🎯 <b>Готовитесь к важному тендеру?</b> Давайте обсудим стратегию – напишите «Стратегия» в ответ.
-        """
-    }
-]
-
-# =========== КЛАВИАТУРЫ ===========
-def get_main_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📝 Заполнить анкету")],
-            [KeyboardButton(text="📋 Мои заявки"), KeyboardButton(text="📨 Мои сообщения")],
-            [KeyboardButton(text="ℹ️ Помощь"), KeyboardButton(text="📞 Контакты")]
-        ],
-        resize_keyboard=True
-    )
-
-def get_admin_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="👥 Все клиенты"), KeyboardButton(text="🆕 Новые заявки")],
-            [KeyboardButton(text="📤 Отправить тендер"), KeyboardButton(text="📊 Статистика")],
-            [KeyboardButton(text="📢 Рассылка"), KeyboardButton(text="⚙️ Настройки")],
-            [KeyboardButton(text="🏠 Главное меню")]
-        ],
-        resize_keyboard=True
-    )
-
-def get_cancel_keyboard():
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отменить")]],
-        resize_keyboard=True
-    )
-
-# =========== ОСНОВНЫЕ КОМАНДЫ ===========
-@dp.message(Command("start"))
-@dp.message(F.text == "🏠 Главное меню")
-async def cmd_start(message: types.Message):
-    if message.from_user.id in ADMIN_IDS:
+            """
+            await bot.send_message(user_id, tender_export)
+        
+        # Подтверждение админу
         await message.answer(
-            "👑 <b>Панель администратора</b>\n\n"
-            "Доступные функции:\n"
-            "• 👥 Все клиенты - список пользователей\n"
-            "• 📤 Отправить тендер - отправить выгрузку клиенту\n"
-            "• 📢 Рассылка - массовая отправка новостей\n"
-            "• 📊 Статистика - аналитика работы",
+            f"✅ Файл успешно отправлен пользователю ID: {user_id}",
             reply_markup=get_admin_keyboard()
         )
-    else:
+        
+    except Exception as e:
+        logger.error(f"Ошибка отправки файла: {e}")
         await message.answer(
-            "🏢 <b>Добро пожаловать в бот ООО 'Тритика'!</b>\n\n"
-            "Я помогу вам найти подходящие тендеры.\n\n"
-            "Нажмите <b>📝 Заполнить анкету</b>, чтобы начать поиск!",
-            reply_markup=get_main_keyboard()
+            f"❌ Ошибка отправки файла: {str(e)}",
+            reply_markup=get_admin_keyboard()
         )
-
-# =========== ЗАПОЛНЕНИЕ АНКЕТЫ ===========
-@dp.message(F.text == "📝 Заполнить анкету")
-async def start_questionnaire(message: types.Message, state: FSMContext):
-    await message.answer(
-        "📋 <b>Начнем заполнение анкеты!</b>\n\n"
-        "Как к вам обращаться?\n"
-        "<i>Введите ваше ФИО:</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_name)
-
-@dp.message(Questionnaire.waiting_for_name)
-async def process_name(message: types.Message, state: FSMContext):
-    await state.update_data(full_name=message.text)
-    await message.answer(
-        f"✅ Приятно познакомиться, {message.text}!\n\n"
-        "<b>Введите название вашей компании:</b>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_company)
-
-@dp.message(Questionnaire.waiting_for_company)
-async def process_company(message: types.Message, state: FSMContext):
-    await state.update_data(company_name=message.text)
-    await message.answer(
-        "✅ Компания сохранена!\n\n"
-        "<b>Введите ИНН компании:</b>\n"
-        "<i>10 или 12 цифр</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_inn)
-
-@dp.message(Questionnaire.waiting_for_inn)
-async def process_inn(message: types.Message, state: FSMContext):
-    await state.update_data(inn=message.text)
-    await message.answer(
-        "✅ ИНН сохранен!\n\n"
-        "<b>Введите контактное лицо:</b>\n"
-        "<i>Кто будет общаться по тендерам</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_contact)
-
-@dp.message(Questionnaire.waiting_for_contact)
-async def process_contact(message: types.Message, state: FSMContext):
-    await state.update_data(contact_person=message.text)
-    await message.answer(
-        "✅ Контакт сохранен!\n\n"
-        "<b>Введите телефон для связи:</b>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_phone)
-
-@dp.message(Questionnaire.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    await state.update_data(phone=message.text)
-    await message.answer(
-        "✅ Телефон сохранен!\n\n"
-        "<b>Введите email:</b>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_email)
-
-@dp.message(Questionnaire.waiting_for_email)
-async def process_email(message: types.Message, state: FSMContext):
-    await state.update_data(email=message.text)
-    await message.answer(
-        "✅ Email сохранен!\n\n"
-        "<b>Введите сферу деятельности (ОКВЭД):</b>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_activity)
-
-@dp.message(Questionnaire.waiting_for_activity)
-async def process_activity(message: types.Message, state: FSMContext):
-    await state.update_data(activity_sphere=message.text)
-    await message.answer(
-        "✅ Сфера сохранена!\n\n"
-        "<b>Введите ключевые слова для поиска:</b>\n"
-        "<i>Чем занимается ваша компания</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_industry)
-
-@dp.message(Questionnaire.waiting_for_industry)
-async def process_industry(message: types.Message, state: FSMContext):
-    await state.update_data(industry=message.text)
-    await message.answer(
-        "✅ Ключевые слова сохранены!\n\n"
-        "<b>Введите бюджет контрактов:</b>\n"
-        "<i>Например: 100 000 - 500 000 руб.</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_amount)
-
-@dp.message(Questionnaire.waiting_for_amount)
-async def process_amount(message: types.Message, state: FSMContext):
-    await state.update_data(contract_amount=message.text)
-    await message.answer(
-        "✅ Бюджет сохранен!\n\n"
-        "<b>Введите регионы работы:</b>\n"
-        "<i>Где готовы выполнять контракты</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_regions)
-
-@dp.message(Questionnaire.waiting_for_regions)
-async def process_regions(message: types.Message, state: FSMContext):
-    user_data = await state.get_data()
-    created_at = datetime.now().strftime("%d.%m.%Y %H:%M")
-    
-    # Сохраняем в базу
-    conn = sqlite3.connect('tenders.db')
-    cursor = conn.cursor()
-    cursor.execute('''
-    INSERT INTO questionnaires 
-    (user_id, username, full_name, company_name, inn, contact_person, phone, email, 
-     activity_sphere, industry, contract_amount, regions, created_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (
-        message.from_user.id,
-        message.from_user.username,
-        user_data['full_name'],
-        user_data['company_name'],
-        user_data['inn'],
-        user_data['contact_person'],
-        user_data['phone'],
-        user_data['email'],
-        user_data['activity_sphere'],
-        user_data['industry'],
-        user_data['contract_amount'],
-        message.text,
-        created_at
-    ))
-    
-    # Добавляем в рассылку
-    cursor.execute('''
-    INSERT OR IGNORE INTO newsletter_subscribers (user_id, username, subscribed_at)
-    VALUES (?, ?, ?)
-    ''', (message.from_user.id, message.from_user.username, created_at))
-    
-    conn.commit()
-    conn.close()
-    
-    # Отправляем подтверждение клиенту
-    await message.answer(RESPONSE_TEMPLATES["request_received"], reply_markup=get_main_keyboard())
-    
-    # Уведомление админам
-    admin_msg = f"""
-    🆕 <b>НОВАЯ ЗАЯВКА #{cursor.lastrowid}</b>
-    
-    👤 <b>Клиент:</b> {user_data['full_name']}
-    🏢 <b>Компания:</b> {user_data['company_name']}
-    📞 <b>Телефон:</b> {user_data['phone']}
-    📧 <b>Email:</b> {user_data['email']}
-    
-    💰 <b>Бюджет:</b> {user_data['contract_amount']}
-    🌍 <b>Регионы:</b> {message.text}
-    
-    Для отправки выгрузки используйте:
-    <code>/send_tender {message.from_user.id}</code>
-    """
-    
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, admin_msg)
-        except Exception as e:
-            logger.error(f"Ошибка отправки админу {admin_id}: {e}")
     
     await state.clear()
 
-# =========== АДМИН: ОТПРАВКА ВЫГРУЗКИ ===========
-@dp.message(F.text == "📤 Отправить тендер")
-async def admin_start_send_tender(message: types.Message, state: FSMContext):
-    if message.from_user.id not in ADMIN_IDS:
-        return
-    
-    await message.answer(
-        "📤 <b>Отправка выгрузки тендеров клиенту</b>\n\n"
-        "Введите ID пользователя:",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(AdminTender.waiting_for_user_id)
-
-@dp.message(AdminTender.waiting_for_user_id)
-async def admin_get_user_id(message: types.Message, state: FSMContext):
-    try:
-        user_id = int(message.text)
-        
-        # Проверяем существование пользователя
-        conn = sqlite3.connect('tenders.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
-        user_data = cursor.fetchone()
-        conn.close()
-        
-        if not user_data:
-            await message.answer("❌ Пользователь не найден. Проверьте ID.")
-            await state.clear()
-            return
-        
-        await state.update_data(target_user_id=user_id)
-        await message.answer(
-            f"✅ Найден пользователь: {user_data[3]}\n"
-            f"🏢 Компания: {user_data[4]}\n\n"
-            f"<b>Введите название тендера:</b>"
-        )
-        await state.set_state(AdminTender.waiting_for_tender_title)
-    except ValueError:
-        await message.answer("❌ Введите корректный ID (число):")
-
-@dp.message(AdminTender.waiting_for_tender_title)
-async def admin_get_tender_title(message: types.Message, state: FSMContext):
-    await state.update_data(tender_title=message.text)
-    await message.answer("✅ Название сохранено!\n\n<b>Введите описание тендера:</b>")
-    await state.set_state(AdminTender.waiting_for_tender_description)
-
-@dp.message(AdminTender.waiting_for_tender_description)
-async def admin_get_tender_description(message: types.Message, state: FSMContext):
-    await state.update_data(tender_description=message.text)
-    await message.answer("✅ Описание сохранено!\n\n<b>Введите ссылку на тендер:</b>")
-    await state.set_state(AdminTender.waiting_for_tender_link)
-
-@dp.message(AdminTender.waiting_for_tender_link)
-async def admin_get_tender_link(message: types.Message, state: FSMContext):
-    await state.update_data(tender_link=message.text)
-    await message.answer("✅ Ссылка сохранена!\n\n<b>Введите бюджет/стоимость:</b>")
-    await state.set_state(AdminTender.waiting_for_tender_amount)
-
-@dp.message(AdminTender.waiting_for_tender_amount)
-async def admin_get_tender_amount(message: types.Message, state: FSMContext):
-    await state.update_data(tender_amount=message.text)
-    await message.answer("✅ Сумма сохранена!\n\n<b>Введите срок подачи:</b>")
-    await state.set_state(AdminTender.waiting_for_tender_deadline)
-
-@dp.message(AdminTender.waiting_for_tender_deadline)
-async def admin_send_tender(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    user_id = data['target_user_id']
-    
-    # Получаем данные пользователя
-    conn = sqlite3.connect('tenders.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT * FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
-    user_data = cursor.fetchone()
-    conn.close()
-    
-    if user_data:
-        # Формируем выгрузку
-        tender_export = RESPONSE_TEMPLATES["tender_export"].format(
-            full_name=user_data[3],
-            activity_sphere=user_data[9],
-            regions=user_data[12],
-            industry=user_data[10],
-            created_at=user_data[14],
-            tender_count="5+"  # Можно изменить на реальное количество
-        )
-        
-        try:
-            # Отправляем клиенту
-            await bot.send_message(user_id, tender_export)
-            
-            # Сообщение о файле
-            file_message = RESPONSE_TEMPLATES["file_sent"].format(
-                filename=f"Тендеры_{datetime.now().strftime('%d.%m.%Y')}.pdf"
-            )
-            await bot.send_message(user_id, file_message)
-            
-            # Уведомляем админа
-            await message.answer(
-                f"✅ Выгрузка отправлена клиенту {user_data[3]}\n"
-                f"📧 Email: {user_data[8]}\n"
-                f"📞 Телефон: {user_data[7]}",
-                reply_markup=get_admin_keyboard()
-            )
-        except Exception as e:
-            await message.answer(f"❌ Ошибка отправки: {str(e)}", reply_markup=get_admin_keyboard())
-    else:
-        await message.answer("❌ Данные пользователя не найдены", reply_markup=get_admin_keyboard())
-    
-    await state.clear()
-
-# =========== БЫСТРАЯ КОМАНДА АДМИНА ===========
-@dp.message(Command("send_tender"))
-async def quick_send_tender(message: types.Message):
-    if message.from_user.id not in ADMIN_IDS:
+@dp.message(Command("send_file"))
+async def quick_send_file_command(message: types.Message):
+    """Быстрая команда для отправки файла"""
+    if message.from_user.id != ADMIN_ID:
         return
     
     args = message.text.split()
     if len(args) < 2:
-        await message.answer("Использование: /send_tender ID_пользователя")
+        await message.answer("Использование: /send_file ID_пользователя")
         return
     
     try:
         user_id = int(args[1])
-        conn = sqlite3.connect('tenders.db')
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1", (user_id,))
-        user_data = cursor.fetchone()
-        conn.close()
+        await message.answer(
+            f"📁 <b>Отправка файла пользователю ID: {user_id}</b>\n\n"
+            f"Теперь отправьте файл (PDF, Word, Excel или архив):"
+        )
         
-        if user_data:
-            # Быстрая отправка стандартной выгрузки
-            tender_export = RESPONSE_TEMPLATES["tender_export"].format(
-                full_name=user_data[3],
-                activity_sphere=user_data[9],
-                regions=user_data[12],
-                industry=user_data[10],
-                created_at=user_data[14],
-                tender_count="5+"
-            )
-            
-            await bot.send_message(user_id, tender_export)
-            await bot.send_message(user_id, RESPONSE_TEMPLATES["file_sent"].format(
-                filename=f"Тендеры_{datetime.now().strftime('%d.%m.%Y')}.pdf"
-            ))
-            
-            await message.answer(f"✅ Быстрая выгрузка отправлена клиенту {user_data[3]}")
-        else:
-            await message.answer("❌ Пользователь не найден")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {str(e)}")
+        # Сохраняем ID в состоянии
+        from aiogram.fsm.context import FSMContext
+        state = FSMContext(storage=storage, key=message.chat.id)
+        await state.set_state(AdminAction.waiting_for_file)
+        await state.update_data(target_user_id=user_id)
+        
+    except ValueError:
+        await message.answer("❌ Введите корректный ID (число)")
 
-# =========== РАССЫЛКА ===========
-async def send_newsletter():
-    """Автоматическая рассылка каждые 2 недели"""
-    conn = sqlite3.connect('tenders.db')
-    cursor = conn.cursor()
-    cursor.execute("SELECT user_id, username FROM newsletter_subscribers")
-    subscribers = cursor.fetchall()
-    conn.close()
+# =========== ОБЩЕНИЕ МЕЖДУ КЛИЕНТОМ И АДМИНОМ ===========
+@dp.message(F.text == "📨 Написать менеджеру")
+async def start_message_to_admin(message: types.Message, state: FSMContext):
+    """Пользователь начинает диалог с админом"""
+    await message.answer(
+        "📨 <b>Написать менеджеру</b>\n\n"
+        "Введите ваше сообщение для менеджера:\n"
+        "<i>Опишите вопрос или ситуацию подробно</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(AdminAction.waiting_for_message)
+    await state.update_data(is_user_to_admin=True)
+
+@dp.message(F.text == "💬 Написать клиенту")
+async def admin_start_message_to_user(message: types.Message, state: FSMContext):
+    """Админ начинает диалог с клиентом"""
+    if message.from_user.id != ADMIN_ID:
+        return
     
-    # Выбираем рассылку по очереди
-    newsletter_index = get_newsletter_index()
-    newsletter = NEWSLETTERS[newsletter_index]
+    await message.answer(
+        "💬 <b>Написать клиенту</b>\n\n"
+        "Введите ID пользователя для отправки сообщения:",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(AdminAction.waiting_for_user_id)
+    await state.update_data(is_admin_to_user=True)
+
+@dp.message(AdminAction.waiting_for_message)
+async def send_message_between_users(message: types.Message, state: FSMContext):
+    """Отправка сообщения между пользователем и админом"""
+    data = await state.get_data()
+    message_text = message.text
     
-    success_count = 0
-    fail_count = 0
+    if data.get('is_user_to_admin'):
+        # Пользователь пишет админу
+        save_message_to_db(message.from_user.id, ADMIN_ID, message_text)
+        
+        # Отправляем админу
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"📨 <b>Сообщение от пользователя ID: {message.from_user.id}</b>\n\n"
+                f"👤 Пользователь: @{message.from_user.username or 'не указан'}\n"
+                f"💬 Сообщение: {message_text}\n\n"
+                f"<i>Для ответа используйте команду: /reply_{message.from_user.id}</i>"
+            )
+            await message.answer(
+                "✅ Ваше сообщение отправлено менеджеру. Ответ придет в этот чат.",
+                reply_markup=get_main_keyboard()
+            )
+        except Exception as e:
+            await message.answer(
+                "❌ Не удалось отправить сообщение. Попробуйте позже.",
+                reply_markup=get_main_keyboard()
+            )
     
-    for user_id, username in subscribers:
+    elif data.get('target_user_id'):
+        # Админ пишет пользователю
+        user_id = data['target_user_id']
+        save_message_to_db(ADMIN_ID, user_id, message_text)
+        
         try:
             await bot.send_message(
                 user_id,
-                f"📢 <b>{newsletter['title']}</b>\n\n{newsletter['content']}\n\n"
-                f"<i>Команда ООО 'Тритика'</i>\n"
-                f"📞 +7 (904) 653-69-87\n"
-                f"🌐 https://tritika.ru/"
+                f"📨 <b>Сообщение от менеджера:</b>\n\n{message_text}\n\n"
+                f"<i>Для ответа нажмите '📨 Написать менеджеру'</i>"
             )
-            success_count += 1
-            await asyncio.sleep(0.5)  # Задержка между отправками
+            await message.answer(
+                f"✅ Сообщение отправлено пользователю ID: {user_id}",
+                reply_markup=get_admin_keyboard()
+            )
         except Exception as e:
-            fail_count += 1
-            logger.error(f"Ошибка отправки рассылки пользователю {user_id}: {e}")
-    
-    # Уведомление админам
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(
-                admin_id,
-                f"📊 <b>Отчет по рассылке</b>\n\n"
-                f"✅ Успешно отправлено: {success_count}\n"
-                f"❌ Не отправлено: {fail_count}\n"
-                f"📝 Тема: {newsletter['title']}"
+            await message.answer(
+                f"❌ Не удалось отправить сообщение: {str(e)}",
+                reply_markup=get_admin_keyboard()
             )
-        except:
-            pass
+    
+    await state.clear()
 
-def get_newsletter_index():
-    """Получаем индекс рассылки для текущего периода"""
+@dp.message(Command("reply"))
+async def quick_reply_command(message: types.Message):
+    """Быстрый ответ админа пользователю"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    args = message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await message.answer("Использование: /reply ID_пользователя текст_сообщения")
+        return
+    
     try:
-        with open('newsletter_index.txt', 'r') as f:
-            return int(f.read().strip())
-    except:
-        return 0
+        user_id = int(args[1])
+        reply_text = args[2]
+        
+        save_message_to_db(ADMIN_ID, user_id, reply_text)
+        
+        await bot.send_message(
+            user_id,
+            f"📨 <b>Сообщение от менеджера:</b>\n\n{reply_text}\n\n"
+            f"<i>Для ответа нажмите '📨 Написать менеджеру'</i>"
+        )
+        
+        await message.answer(f"✅ Ответ отправлен пользователю ID: {user_id}")
+        
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {str(e)}")
 
-def save_newsletter_index(index):
-    """Сохраняем индекс рассылки"""
-    with open('newsletter_index.txt', 'w') as f:
-        f.write(str(index))
+# =========== ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ ===========
+@dp.message(F.text == "ℹ️ О компании")
+async def about_company(message: types.Message):
+    """Информация о компании"""
+    await message.answer(
+        "🏢 <b>О компании ТРИТИКА</b>\n\n"
+        "<b>Мы помогаем бизнесу находить выгодные тендеры</b>\n\n"
+        "<b>Наши услуги:</b>\n"
+        "• Поиск тендеров по вашим параметрам\n"
+        "• Персональная выгрузка в течение часа\n"
+        "• Консультации по участию в торгах\n"
+        "• Сопровождение сделок\n\n"
+        "<b>Контакты:</b>\n"
+        "📞 Телефон: +7 (904) 653-69-87\n"
+        "📧 Email: info@tritika.ru\n"
+        "🌐 Сайт: https://tritika.ru/\n\n"
+        "<b>График работы:</b>\n"
+        "Пн-Пт: 9:00-18:00\n"
+        "Сб: 10:00-15:00\n"
+        "Вс: выходной",
+        reply_markup=get_main_keyboard()
+    )
+
+@dp.message(F.text == "📋 Статистика")
+async def admin_statistics(message: types.Message):
+    """Статистика для админа"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Общее количество заявок
+        cursor.execute("SELECT COUNT(*) FROM questionnaires")
+        total = cursor.fetchone()[0]
+        
+        # Новые заявки
+        cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE status = 'new'")
+        new = cursor.fetchone()[0]
+        
+        # Обработанные заявки
+        cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE status = 'processed'")
+        processed = cursor.fetchone()[0]
+        
+        # Отправленные файлы
+        cursor.execute("SELECT COUNT(*) FROM sent_files")
+        sent_files = cursor.fetchone()[0]
+        
+        # Сообщения
+        cursor.execute("SELECT COUNT(*) FROM messages")
+        messages = cursor.fetchone()[0]
+        
+        conn.close()
+        
+        stats_text = f"""
+📊 <b>Статистика бота</b>
+
+<b>Заявки:</b>
+• Всего заявок: {total}
+• Новые заявки: {new}
+• Обработанные: {processed}
+
+<b>Активность:</b>
+• Отправлено файлов: {sent_files}
+• Сообщений в чатах: {messages}
+
+<b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+        """
+        
+        await message.answer(stats_text, reply_markup=get_admin_keyboard())
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        await message.answer("❌ Ошибка получения статистики", reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "❌ Отменить")
+async def cancel_action(message: types.Message, state: FSMContext):
+    """Отмена текущего действия"""
+    current_state = await state.get_state()
+    if current_state is None:
+        return
+    
+    await message.answer(
+        "❌ Действие отменено.",
+        reply_markup=get_admin_keyboard() if message.from_user.id == ADMIN_ID else get_main_keyboard()
+    )
+    await state.clear()
+
+# =========== ОБРАБОТКА ВСЕХ СООБЩЕНИЙ ===========
+@dp.message()
+async def handle_all_messages(message: types.Message):
+    """Обработка всех остальных сообщений"""
+    if message.from_user.id == ADMIN_ID:
+        await message.answer(
+            "Используйте кнопки ниже или команды:\n"
+            "/start - главное меню\n"
+            "/send_file ID - отправить файл клиенту\n"
+            "/reply ID текст - ответить клиенту",
+            reply_markup=get_admin_keyboard()
+        )
+    else:
+        await message.answer(
+            "Используйте кнопки ниже:\n"
+            "📝 Заполнить анкету - поиск тендеров\n"
+            "📨 Написать менеджеру - задать вопрос\n"
+            "ℹ️ О компании - информация",
+            reply_markup=get_main_keyboard()
+        )
 
 # =========== ЗАПУСК БОТА ===========
-async def on_startup():
-    """Действия при запуске"""
-    logger.info("✅ Бот запущен на Replit!")
-    
-    # Запускаем планировщик для рассылки каждые 2 недели
-    scheduler.add_job(
-        send_newsletter,
-        CronTrigger(day_of_week='mon', hour=10, minute=0),  # Каждый понедельник в 10:00
-        id='newsletter',
-        replace_existing=True
-    )
-    scheduler.start()
-    
-    # Уведомляем админов
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(admin_id, "🤖 Бот успешно запущен на Replit!")
-        except:
-            pass
-
 async def main():
-    # Запускаем фоновый сервер для keep-alive
-    keep_alive()
+    """Запуск бота"""
+    logger.info("🚀 Запуск бота ТРИТИКА на Replit...")
     
-    await on_startup()
-    await dp.start_polling(bot)
+    try:
+        # Запускаем бота
+        await dp.start_polling(bot)
+    except Exception as e:
+        logger.error(f"❌ Критическая ошибка: {e}")
+        raise
 
 if __name__ == "__main__":
     asyncio.run(main())
