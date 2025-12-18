@@ -3,6 +3,7 @@ import sqlite3
 import logging
 import asyncio
 import shutil
+import sys
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter, BaseFilter
@@ -19,7 +20,6 @@ from aiogram.types import (
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 from aiohttp import web
-import threading
 
 # Настройка логирования
 logging.basicConfig(
@@ -38,11 +38,11 @@ ADMIN_ID = os.getenv("ADMIN_ID")
 
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не установлен! Добавьте в Secrets.")
-    exit(1)
+    sys.exit(1)
 
 if not ADMIN_ID:
     logger.error("❌ ADMIN_ID не установлен! Добавьте в Secrets.")
-    exit(1)
+    sys.exit(1)
 
 ADMIN_ID = int(ADMIN_ID)
 
@@ -1167,7 +1167,7 @@ async def handle_all_messages(message: types.Message):
 # =========== HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
 async def health_check(request):
     """Обработчик healthcheck для Railway"""
-    return web.Response(text='OK')
+    return web.Response(text='OK', status=200)
 
 async def start_http_server():
     """Запуск HTTP сервера для healthcheck"""
@@ -1176,11 +1176,13 @@ async def start_http_server():
     
     # Создаем приложение aiohttp
     app = web.Application()
+    
+    # Добавляем маршруты
     app.router.add_get('/', health_check)
     app.router.add_get('/health', health_check)
     
     # Настраиваем runner
-    runner = web.AppRunner(app)
+    runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     
     # Запускаем сайт
@@ -1188,16 +1190,17 @@ async def start_http_server():
     await site.start()
     
     logger.info(f"✅ HTTP сервер запущен на порту {port}")
-    return runner
+    return runner, app
 
 # =========== ЗАПУСК БОТА С HTTP СЕРВЕРОМ ===========
 async def main():
     """Запуск бота с HTTP сервером для Railway"""
     logger.info("🚀 Запуск бота ТРИТИКА на Railway...")
     
+    http_runner = None
     try:
-        # Запускаем HTTP сервер для healthcheck
-        http_runner = await start_http_server()
+        # Сначала запускаем HTTP сервер для healthcheck
+        http_runner, _ = await start_http_server()
         
         # Даем время серверу запуститься
         await asyncio.sleep(1)
@@ -1206,7 +1209,7 @@ async def main():
         bot_info = await bot.get_me()
         logger.info(f"✅ Бот запущен: @{bot_info.username}")
         
-        # Запускаем бота
+        # Запускаем бота с поллингом
         await dp.start_polling(bot)
         
     except Exception as e:
@@ -1214,11 +1217,17 @@ async def main():
         raise
     finally:
         # Останавливаем HTTP сервер при завершении
-        if 'http_runner' in locals():
+        if http_runner:
             await http_runner.cleanup()
             logger.info("✅ HTTP сервер остановлен")
 
 # =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
 if __name__ == "__main__":
     # Для Railway запускаем asyncio
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("🛑 Бот остановлен пользователем")
+    except Exception as e:
+        logger.error(f"❌ Непредвиденная ошибка: {e}")
+        sys.exit(1)
