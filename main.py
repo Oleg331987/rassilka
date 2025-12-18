@@ -4,6 +4,7 @@ import logging
 import asyncio
 import shutil
 import sys
+import threading
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter, BaseFilter
@@ -19,7 +20,8 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiohttp import web
+from flask import Flask, request
+import time
 
 # Настройка логирования
 logging.basicConfig(
@@ -1165,69 +1167,61 @@ async def handle_all_messages(message: types.Message):
         )
 
 # =========== HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
-async def health_check(request):
-    """Обработчик healthcheck для Railway"""
-    return web.Response(text='OK', status=200)
+# Создаем Flask приложение для healthcheck
+app = Flask(__name__)
 
-async def start_http_server():
-    """Запуск HTTP сервера для healthcheck"""
-    # Получаем порт из переменной окружения Railway
+@app.route('/')
+def health_check():
+    """Простой healthcheck для Railway"""
+    return 'OK', 200
+
+@app.route('/health')
+def health():
+    """Альтернативный healthcheck endpoint"""
+    return 'OK', 200
+
+def run_flask():
+    """Запуск Flask сервера в отдельном потоке"""
     port = int(os.environ.get('PORT', 8080))
-    
-    # Создаем приложение aiohttp
-    app = web.Application()
-    
-    # Добавляем маршруты
-    app.router.add_get('/', health_check)
-    app.router.add_get('/health', health_check)
-    
-    # Настраиваем runner
-    runner = web.AppRunner(app, access_log=None)
-    await runner.setup()
-    
-    # Запускаем сайт
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    
-    logger.info(f"✅ HTTP сервер запущен на порту {port}")
-    return runner, app
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True, use_reloader=False)
 
-# =========== ЗАПУСК БОТА С HTTP СЕРВЕРОМ ===========
-async def main():
-    """Запуск бота с HTTP сервером для Railway"""
-    logger.info("🚀 Запуск бота ТРИТИКА на Railway...")
+# =========== ЗАПУСК БОТА ===========
+async def run_bot():
+    """Запуск Telegram бота"""
+    logger.info("🚀 Запуск Telegram бота...")
     
-    http_runner = None
     try:
-        # Сначала запускаем HTTP сервер для healthcheck
-        http_runner, _ = await start_http_server()
-        
-        # Даем время серверу запуститься
-        await asyncio.sleep(1)
-        
         # Проверяем соединение с ботом
         bot_info = await bot.get_me()
         logger.info(f"✅ Бот запущен: @{bot_info.username}")
         
-        # Запускаем бота с поллингом
+        # Запускаем бота
         await dp.start_polling(bot)
-        
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}")
+        logger.error(f"❌ Ошибка запуска бота: {e}")
         raise
-    finally:
-        # Останавливаем HTTP сервер при завершении
-        if http_runner:
-            await http_runner.cleanup()
-            logger.info("✅ HTTP сервер остановлен")
 
-# =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
-if __name__ == "__main__":
-    # Для Railway запускаем asyncio
+def main():
+    """Основная функция запуска приложения"""
+    logger.info("🚀 Запуск приложения ТРИТИКА на Railway...")
+    
+    # Запускаем Flask сервер для healthcheck в отдельном потоке
+    flask_thread = threading.Thread(target=run_flask, daemon=True)
+    flask_thread.start()
+    logger.info(f"✅ Flask сервер запущен на порту {os.environ.get('PORT', 8080)}")
+    
+    # Даем время Flask серверу запуститься
+    time.sleep(2)
+    
+    # Запускаем Telegram бота
     try:
-        asyncio.run(main())
+        asyncio.run(run_bot())
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем")
     except Exception as e:
-        logger.error(f"❌ Непредвиденная ошибка: {e}")
+        logger.error(f"❌ Критическая ошибка: {e}")
         sys.exit(1)
+
+# =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
+if __name__ == "__main__":
+    main()
