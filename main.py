@@ -18,8 +18,6 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiohttp import web
-import aiohttp
 
 # Настройка логирования
 logging.basicConfig(
@@ -196,7 +194,6 @@ class AdminAction(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_file = State()
     waiting_for_message = State()
-    waiting_for_file_with_id = State()
 
 # =========== КЛАВИАТУРЫ ===========
 def get_main_keyboard():
@@ -1166,23 +1163,24 @@ async def handle_all_messages(message: types.Message):
         )
 
 # =========== HTTP SERVER FOR HEALTHCHECK ===========
-async def healthcheck(request):
-    """Обработчик healthcheck для Replit"""
-    return web.Response(text="OK")
+import threading
+from flask import Flask
 
-async def start_http_server():
-    """Запуск HTTP сервера для healthcheck"""
-    app = web.Application()
-    app.router.add_get('/', healthcheck)
-    app.router.add_get('/health', healthcheck)
-    
+# Создаем Flask приложение для healthcheck
+flask_app = Flask(__name__)
+
+@flask_app.route('/')
+def healthcheck():
+    return 'OK'
+
+@flask_app.route('/health')
+def health():
+    return 'OK', 200
+
+def run_flask():
+    """Запуск Flask сервера в отдельном потоке"""
     port = int(os.environ.get('PORT', 8080))
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', port)
-    await site.start()
-    logger.info(f"✅ HTTP сервер запущен на порту {port}")
-    return runner
+    flask_app.run(host='0.0.0.0', port=port, debug=False)
 
 # =========== ЗАПУСК БОТА ===========
 async def main():
@@ -1190,8 +1188,13 @@ async def main():
     logger.info("🚀 Запуск бота ТРИТИКА на Replit...")
     
     try:
-        # Запускаем HTTP сервер для healthcheck
-        http_runner = await start_http_server()
+        # Запускаем HTTP сервер для healthcheck в отдельном потоке
+        flask_thread = threading.Thread(target=run_flask, daemon=True)
+        flask_thread.start()
+        logger.info(f"✅ HTTP сервер запущен на порту {os.environ.get('PORT', 8080)}")
+        
+        # Даем время серверу запуститься
+        await asyncio.sleep(2)
         
         # Проверяем соединение с ботом
         bot_info = await bot.get_me()
@@ -1200,12 +1203,10 @@ async def main():
         # Запускаем бота
         await dp.start_polling(bot)
         
-        # Останавливаем HTTP сервер при завершении
-        await http_runner.cleanup()
-        
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
         raise
 
 if __name__ == "__main__":
+    # Для Replit: запускаем asyncio в отдельном потоке
     asyncio.run(main())
