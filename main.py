@@ -23,7 +23,7 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 import http.server
 import socketserver
-import signal
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 # Настройка логирования
 logging.basicConfig(
@@ -1169,7 +1169,7 @@ async def handle_all_messages(message: types.Message):
         )
 
 # =========== ПРОСТОЙ HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
-class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == '/' or self.path == '/health':
             self.send_response(200)
@@ -1187,9 +1187,9 @@ class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
 def run_healthcheck_server():
     """Запуск простого HTTP сервера для healthcheck"""
     port = int(os.environ.get('PORT', 8080))
-    with socketserver.TCPServer(("0.0.0.0", port), HealthCheckHandler) as httpd:
-        logger.info(f"✅ Healthcheck сервер запущен на порту {port}")
-        httpd.serve_forever()
+    server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+    logger.info(f"✅ Healthcheck сервер запущен на порту {port}")
+    server.serve_forever()
 
 # =========== ЗАПУСК БОТА ===========
 async def run_bot():
@@ -1202,7 +1202,7 @@ async def run_bot():
         logger.info(f"✅ Бот запущен: @{bot_info.username}")
         
         # Запускаем бота
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
         logger.error(f"❌ Ошибка запуска бота: {e}")
         raise
@@ -1211,19 +1211,16 @@ def main():
     """Основная функция запуска приложения"""
     logger.info("🚀 Запуск приложения ТРИТИКА на Railway...")
     
-    # ЗАПУСКАЕМ HTTP СЕРВЕР В ОТДЕЛЬНОМ ПРОЦЕССЕ - ВАЖНО!
-    import multiprocessing
+    # ЗАПУСКАЕМ HTTP СЕРВЕР В ОТДЕЛЬНОМ ПОТОКЕ
+    http_thread = threading.Thread(target=run_healthcheck_server, daemon=True)
+    http_thread.start()
     
-    # Создаем отдельный процесс для HTTP сервера
-    http_process = multiprocessing.Process(target=run_healthcheck_server, daemon=True)
-    http_process.start()
-    
-    logger.info(f"✅ Healthcheck сервер запущен в отдельном процессе (PID: {http_process.pid})")
+    logger.info(f"✅ Healthcheck сервер запущен в отдельном потоке")
     
     # Даем время серверу запуститься и начать отвечать на запросы
-    time.sleep(3)
+    time.sleep(2)
     
-    # Запускаем Telegram бота в основном процессе
+    # Запускаем Telegram бота в основном потоке
     try:
         # Используем отдельный event loop для бота
         asyncio.run(run_bot())
@@ -1232,15 +1229,7 @@ def main():
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
         sys.exit(1)
-    finally:
-        # Останавливаем HTTP процесс при завершении
-        if http_process.is_alive():
-            http_process.terminate()
-            http_process.join()
-            logger.info("✅ Healthcheck сервер остановлен")
 
 # =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
 if __name__ == "__main__":
-    # Убедимся, что мы в основном процессе
-    multiprocessing.freeze_support()
     main()
