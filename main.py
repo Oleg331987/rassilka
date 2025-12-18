@@ -5,6 +5,7 @@ import asyncio
 import shutil
 import sys
 import threading
+import time
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter, BaseFilter
@@ -20,8 +21,9 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from flask import Flask, request
-import time
+import http.server
+import socketserver
+import signal
 
 # Настройка логирования
 logging.basicConfig(
@@ -1166,24 +1168,28 @@ async def handle_all_messages(message: types.Message):
             reply_markup=get_main_keyboard()
         )
 
-# =========== HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
-# Создаем Flask приложение для healthcheck
-app = Flask(__name__)
+# =========== ПРОСТОЙ HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
+class HealthCheckHandler(http.server.SimpleHTTPRequestHandler):
+    def do_GET(self):
+        if self.path == '/' or self.path == '/health':
+            self.send_response(200)
+            self.send_header('Content-type', 'text/plain')
+            self.end_headers()
+            self.wfile.write(b'OK')
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    def log_message(self, format, *args):
+        # Отключаем стандартное логирование запросов
+        pass
 
-@app.route('/')
-def health_check():
-    """Простой healthcheck для Railway"""
-    return 'OK', 200
-
-@app.route('/health')
-def health():
-    """Альтернативный healthcheck endpoint"""
-    return 'OK', 200
-
-def run_flask():
-    """Запуск Flask сервера в отдельном потоке"""
+def run_healthcheck_server():
+    """Запуск простого HTTP сервера для healthcheck"""
     port = int(os.environ.get('PORT', 8080))
-    app.run(host='0.0.0.0', port=port, debug=False, threaded=True, use_reloader=False)
+    with socketserver.TCPServer(("0.0.0.0", port), HealthCheckHandler) as httpd:
+        logger.info(f"✅ Healthcheck сервер запущен на порту {port}")
+        httpd.serve_forever()
 
 # =========== ЗАПУСК БОТА ===========
 async def run_bot():
@@ -1205,23 +1211,36 @@ def main():
     """Основная функция запуска приложения"""
     logger.info("🚀 Запуск приложения ТРИТИКА на Railway...")
     
-    # Запускаем Flask сервер для healthcheck в отдельном потоке
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
-    logger.info(f"✅ Flask сервер запущен на порту {os.environ.get('PORT', 8080)}")
+    # ЗАПУСКАЕМ HTTP СЕРВЕР В ОТДЕЛЬНОМ ПРОЦЕССЕ - ВАЖНО!
+    import multiprocessing
     
-    # Даем время Flask серверу запуститься
-    time.sleep(2)
+    # Создаем отдельный процесс для HTTP сервера
+    http_process = multiprocessing.Process(target=run_healthcheck_server, daemon=True)
+    http_process.start()
     
-    # Запускаем Telegram бота
+    logger.info(f"✅ Healthcheck сервер запущен в отдельном процессе (PID: {http_process.pid})")
+    
+    # Даем время серверу запуститься и начать отвечать на запросы
+    time.sleep(3)
+    
+    # Запускаем Telegram бота в основном процессе
     try:
+        # Используем отдельный event loop для бота
         asyncio.run(run_bot())
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем")
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
         sys.exit(1)
+    finally:
+        # Останавливаем HTTP процесс при завершении
+        if http_process.is_alive():
+            http_process.terminate()
+            http_process.join()
+            logger.info("✅ Healthcheck сервер остановлен")
 
 # =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
 if __name__ == "__main__":
+    # Убедимся, что мы в основном процессе
+    multiprocessing.freeze_support()
     main()
