@@ -6,6 +6,8 @@ import shutil
 import sys
 import threading
 import time
+import csv
+import io
 from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command, StateFilter, BaseFilter
@@ -58,6 +60,15 @@ bot = Bot(
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
+# Глобальные переменные для хранения данных о рассылке
+mailing_data = {
+    'active': False,
+    'message_text': '',
+    'sent_count': 0,
+    'error_count': 0,
+    'start_time': None
+}
+
 # Антифлуд фильтр
 class AntiFlood(BaseFilter):
     def __init__(self, seconds: int = 2):
@@ -79,6 +90,7 @@ class AntiFlood(BaseFilter):
 # Валидация ИНН
 def validate_inn(inn: str) -> bool:
     """Проверка валидности ИНН"""
+    inn = inn.strip()
     if len(inn) not in (10, 12) or not inn.isdigit():
         return False
     
@@ -97,13 +109,16 @@ def catch_state_errors(func):
         try:
             return await func(message, state, *args, **kwargs)
         except Exception as e:
-            logger.error(f"Ошибка в состоянии: {e}")
-            await state.clear()
-            keyboard = get_admin_keyboard() if message.from_user.id == ADMIN_ID else get_main_keyboard()
-            await message.answer(
-                "⚠️ Произошла ошибка. Возврат в главное меню.",
-                reply_markup=keyboard
-            )
+            logger.error(f"Ошибка в состоянии {func.__name__}: {e}", exc_info=True)
+            try:
+                await state.clear()
+                keyboard = get_admin_keyboard() if message.from_user.id == ADMIN_ID else get_main_keyboard()
+                await message.answer(
+                    "⚠️ Произошла ошибка. Возврат в главное меню.",
+                    reply_markup=keyboard
+                )
+            except:
+                pass
     return wrapper
 
 # Резервное копирование базы данных
@@ -149,7 +164,11 @@ def init_db():
         regions TEXT,
         status TEXT DEFAULT 'new',
         created_at TEXT,
-        admin_comment TEXT
+        admin_comment TEXT,
+        feedback_given BOOLEAN DEFAULT 0,
+        feedback_date TEXT,
+        feedback_text TEXT,
+        last_mailing_date TEXT
     )
     ''')
     
@@ -172,6 +191,18 @@ def init_db():
         file_name TEXT,
         sent_by INTEGER,
         sent_at TEXT
+    )
+    ''')
+    
+    # Таблица истории рассылок
+    cursor.execute('''
+    CREATE TABLE IF NOT EXISTS mailings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        mailing_date TEXT,
+        message_text TEXT,
+        total_users INTEGER,
+        successful_sends INTEGER,
+        failed_sends INTEGER
     )
     ''')
     
@@ -200,6 +231,11 @@ class AdminAction(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_file = State()
     waiting_for_message = State()
+    waiting_for_mailing_text = State()
+    waiting_for_feedback_export = State()
+
+class UserFeedback(StatesGroup):
+    waiting_for_feedback = State()
 
 # =========== КЛАВИАТУРЫ ===========
 def get_main_keyboard():
@@ -208,6 +244,7 @@ def get_main_keyboard():
         keyboard=[
             [KeyboardButton(text="📝 Заполнить анкету")],
             [KeyboardButton(text="📨 Написать менеджеру")],
+            [KeyboardButton(text="💬 Оставить отзыв")],
             [KeyboardButton(text="ℹ️ О компании")],
         ],
         resize_keyboard=True,
@@ -221,6 +258,7 @@ def get_admin_keyboard():
         keyboard=[
             [KeyboardButton(text="📊 Все заявки"), KeyboardButton(text="🆕 Новые заявки")],
             [KeyboardButton(text="📁 Отправить файл клиенту"), KeyboardButton(text="💬 Написать клиенту")],
+            [KeyboardButton(text="📤 Сделать рассылку"), KeyboardButton(text="📊 Отчет по отзывам")],
             [KeyboardButton(text="📋 Статистика"), KeyboardButton(text="🏠 Главное меню")],
         ],
         resize_keyboard=True
@@ -243,6 +281,17 @@ def get_pagination_keyboard(page: int, total_pages: int):
         buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"page_{page+1}"))
     
     return InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
+
+def get_yes_no_keyboard():
+    """Клавиатура Да/Нет для отзывов"""
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="✅ Да, все отлично"), KeyboardButton(text="❌ Есть замечания")],
+            [KeyboardButton(text="❌ Отменить")]
+        ],
+        resize_keyboard=True
+    )
+    return keyboard
 
 # =========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===========
 def save_questionnaire_to_db(user_data):
@@ -278,7 +327,7 @@ def save_questionnaire_to_db(user_data):
         
         return questionnaire_id
     except Exception as e:
-        logger.error(f"Ошибка сохранения в БД: {e}")
+        logger.error(f"Ошибка сохранения в БД: {e}", exc_info=True)
         return None
 
 def get_questionnaires(status=None, page=1, per_page=10):
@@ -359,6 +408,204 @@ def save_message_to_db(from_id, to_id, message_text):
         logger.error(f"Ошибка сохранения сообщения: {e}")
         return False
 
+def save_feedback(user_id, feedback_text, is_positive=True):
+    """Сохраняем отзыв пользователя"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Получаем анкету пользователя
+        cursor.execute(
+            "SELECT id FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+            (user_id,)
+        )
+        questionnaire = cursor.fetchone()
+        
+        if questionnaire:
+            questionnaire_id = questionnaire[0]
+            cursor.execute(
+                """UPDATE questionnaires 
+                SET feedback_given = 1, 
+                    feedback_date = ?,
+                    feedback_text = ?
+                WHERE id = ?""",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), feedback_text, questionnaire_id)
+            )
+        
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения отзыва: {e}")
+        return False
+
+def get_feedback_report():
+    """Получаем отчет по отзывам"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        
+        # Получаем статистику
+        cursor.execute("SELECT COUNT(*) FROM questionnaires")
+        total_users = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE feedback_given = 1")
+        feedback_given = cursor.fetchone()[0]
+        
+        cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE feedback_given = 0")
+        no_feedback = cursor.fetchone()[0]
+        
+        # Получаем детальную информацию
+        cursor.execute('''
+        SELECT id, user_id, full_name, company_name, feedback_given, 
+               feedback_date, feedback_text
+        FROM questionnaires 
+        ORDER BY created_at DESC
+        ''')
+        
+        detailed_data = cursor.fetchall()
+        conn.close()
+        
+        return {
+            'total_users': total_users,
+            'feedback_given': feedback_given,
+            'no_feedback': no_feedback,
+            'detailed_data': detailed_data
+        }
+    except Exception as e:
+        logger.error(f"Ошибка получения отчета: {e}")
+        return None
+
+def get_all_users():
+    """Получаем всех пользователей для рассылки"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("SELECT DISTINCT user_id FROM questionnaires WHERE user_id IS NOT NULL")
+        users = [row[0] for row in cursor.fetchall()]
+        conn.close()
+        return users
+    except Exception as e:
+        logger.error(f"Ошибка получения пользователей: {e}")
+        return []
+
+def save_mailing_stats(total_users, successful, failed, message_text):
+    """Сохраняем статистику рассылки"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute(
+            """INSERT INTO mailings 
+            (mailing_date, message_text, total_users, successful_sends, failed_sends)
+            VALUES (?, ?, ?, ?, ?)""",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 
+             message_text[:500],  # Обрезаем длинный текст
+             total_users, successful, failed)
+        )
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка сохранения статистики рассылки: {e}")
+        return False
+
+def update_last_mailing_date(user_id):
+    """Обновляем дату последней рассылки для пользователя"""
+    try:
+        conn = sqlite3.connect('tenders.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE questionnaires SET last_mailing_date = ? WHERE user_id = ?",
+            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id)
+        )
+        conn.commit()
+        conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка обновления даты рассылки: {e}")
+
+async def send_mailing_to_user(user_id, message_text):
+    """Отправляем рассылку одному пользователю"""
+    try:
+        await bot.send_message(
+            user_id,
+            message_text,
+            parse_mode=ParseMode.HTML
+        )
+        update_last_mailing_date(user_id)
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
+        return False
+
+async def start_mailing_task(message_text, admin_id):
+    """Запускаем задачу рассылки"""
+    global mailing_data
+    
+    users = get_all_users()
+    total_users = len(users)
+    
+    if total_users == 0:
+        await bot.send_message(admin_id, "❌ Нет пользователей для рассылки.")
+        return
+    
+    mailing_data['active'] = True
+    mailing_data['message_text'] = message_text
+    mailing_data['sent_count'] = 0
+    mailing_data['error_count'] = 0
+    mailing_data['start_time'] = datetime.now()
+    
+    await bot.send_message(
+        admin_id,
+        f"🚀 Начинаю рассылку для {total_users} пользователей...\n\n"
+        f"Сообщение: {message_text[:100]}..."
+    )
+    
+    successful = 0
+    failed = 0
+    
+    for i, user_id in enumerate(users, 1):
+        if not mailing_data['active']:
+            await bot.send_message(admin_id, "❌ Рассылка остановлена администратором.")
+            break
+        
+        result = await send_mailing_to_user(user_id, message_text)
+        if result:
+            successful += 1
+            mailing_data['sent_count'] += 1
+        else:
+            failed += 1
+            mailing_data['error_count'] += 1
+        
+        # Отправляем прогресс каждые 10 пользователей или в конце
+        if i % 10 == 0 or i == total_users:
+            progress = (i / total_users) * 100
+            await bot.send_message(
+                admin_id,
+                f"📊 Прогресс: {i}/{total_users} ({progress:.1f}%)\n"
+                f"✅ Успешно: {successful}\n"
+                f"❌ Ошибок: {failed}"
+            )
+        
+        # Небольшая задержка, чтобы не превысить лимиты Telegram
+        await asyncio.sleep(0.1)
+    
+    # Сохраняем статистику
+    save_mailing_stats(total_users, successful, failed, message_text)
+    
+    # Итоговый отчет
+    duration = (datetime.now() - mailing_data['start_time']).total_seconds()
+    await bot.send_message(
+        admin_id,
+        f"✅ Рассылка завершена!\n\n"
+        f"📊 Итоги:\n"
+        f"• Всего пользователей: {total_users}\n"
+        f"• Успешно отправлено: {successful}\n"
+        f"• С ошибками: {failed}\n"
+        f"• Время выполнения: {duration:.1f} секунд"
+    )
+    
+    mailing_data['active'] = False
+
 # =========== ОБРАБОТЧИКИ КОМАНД ===========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -367,12 +614,15 @@ async def cmd_start(message: types.Message):
         await message.answer(
             "👑 <b>Панель администратора</b>\n\n"
             "Добро пожаловать в админ-панель!\n\n"
-            "Доступные функции:\n"
+            "<b>Новые функции:</b>\n"
+            "• 📤 Сделать рассылку - массовая рассылка клиентам\n"
+            "• 📊 Отчет по отзывам - статистика по обратной связи\n\n"
+            "<b>Доступные функции:</b>\n"
             "• 📊 Все заявки - просмотр всех анкет\n"
             "• 🆕 Новые заявки - только новые заявки\n"
             "• 📁 Отправить файл - отправить выгрузку клиенту\n"
             "• 💬 Написать клиенту - отправить сообщение\n"
-            "• 📋 Статистика - статистика работы\n\n"
+            "• 📋 Статистика - общая статистика работы\n\n"
             "Используйте кнопки ниже:",
             reply_markup=get_admin_keyboard()
         )
@@ -385,6 +635,7 @@ async def cmd_start(message: types.Message):
             "• Персональная выгрузка в течение часа\n"
             "• Консультации по участию\n"
             "• Сопровождение сделок\n\n"
+            "<b>Новая функция:</b> 💬 Оставить отзыв - поделитесь своим мнением о нашей работе!\n\n"
             "Нажмите <b>'📝 Заполнить анкету'</b> чтобы начать!",
             reply_markup=get_main_keyboard()
         )
@@ -402,239 +653,497 @@ async def main_menu(message: types.Message):
 @catch_state_errors
 async def start_questionnaire(message: types.Message, state: FSMContext):
     """Начало заполнения анкеты"""
-    # Проверяем, не заполняется ли уже анкета
-    current_state = await state.get_state()
-    if current_state:
-        await message.answer("Вы уже заполняете анкету. Продолжайте или отмените.")
-        return
-    
-    await message.answer(
-        "📋 <b>Начинаем заполнение анкеты!</b>\n\n"
-        "Заполнение займет 2-3 минуты.\n\n"
-        "<b>Введите ваше ФИО:</b>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_name)
+    try:
+        # Проверяем, не заполняется ли уже анкета
+        current_state = await state.get_state()
+        if current_state:
+            await message.answer("Вы уже заполняете анкету. Продолжайте или нажмите ❌ Отменить.")
+            return
+        
+        await message.answer(
+            "📋 <b>Начинаем заполнение анкеты!</b>\n\n"
+            "Заполнение займет 2-3 минуты.\n\n"
+            "<b>Введите ваше ФИО полностью:</b>\n"
+            "<i>Пример: Иванов Иван Иванович</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_name)
+    except Exception as e:
+        logger.error(f"Ошибка в start_questionnaire: {e}", exc_info=True)
+        await message.answer(
+            "❌ Произошла техническая ошибка. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
 
 @dp.message(Questionnaire.waiting_for_name)
 @catch_state_errors
 async def process_name(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    await state.update_data(full_name=message.text)
-    await message.answer(
-        "✅ <b>ФИО сохранено</b>\n\n"
-        "<b>Введите название вашей компании:</b>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_company)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        if len(message.text.strip()) < 2:
+            await message.answer("❌ ФИО должно содержать минимум 2 символа. Введите снова:")
+            return
+        
+        await state.update_data(full_name=message.text.strip())
+        await message.answer(
+            "✅ <b>ФИО сохранено</b>\n\n"
+            "<b>Введите полное название вашей компании:</b>\n"
+            "<i>Пример: ООО 'Ромашка'</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_company)
+    except Exception as e:
+        logger.error(f"Ошибка в process_name: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении ФИО. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_company)
 @catch_state_errors
 async def process_company(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    await state.update_data(company_name=message.text)
-    await message.answer(
-        "✅ <b>Название компании сохранено</b>\n\n"
-        "<b>Введите ИНН компании:</b>\n"
-        "<i>10 или 12 цифр</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_inn)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        if len(message.text.strip()) < 2:
+            await message.answer("❌ Название компании должно содержать минимум 2 символа. Введите снова:")
+            return
+        
+        await state.update_data(company_name=message.text.strip())
+        await message.answer(
+            "✅ <b>Название компании сохранено</b>\n\n"
+            "<b>Введите ИНН компании:</b>\n"
+            "<i>10 или 12 цифр без пробелов</i>\n"
+            "<i>Пример: 1234567890</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_inn)
+    except Exception as e:
+        logger.error(f"Ошибка в process_company: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении названия компании. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_inn)
 @catch_state_errors
 async def process_inn(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    
-    inn = message.text.strip()
-    if not validate_inn(inn):
-        await message.answer("❌ Неверный ИНН. ИНН должен содержать 10 или 12 цифр. Введите снова:")
-        return
-    
-    await state.update_data(inn=inn)
-    await message.answer(
-        "✅ <b>ИНН сохранен</b>\n\n"
-        "<b>Введите контактное лицо для связи:</b>\n"
-        "<i>Кто будет общаться по тендерам</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_contact)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        inn = message.text.strip().replace(' ', '')
+        if not validate_inn(inn):
+            await message.answer("❌ Неверный ИНН. ИНН должен содержать 10 или 12 цифр. Введите снова:")
+            return
+        
+        await state.update_data(inn=inn)
+        await message.answer(
+            "✅ <b>ИНН сохранен</b>\n\n"
+            "<b>Введите контактное лицо для связи:</b>\n"
+            "<i>Кто будет общаться по тендерам (ФИО или должность)</i>\n"
+            "<i>Пример: Петров Петр Петрович или Менеджер по закупкам</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_contact)
+    except Exception as e:
+        logger.error(f"Ошибка в process_inn: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении ИНН. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_contact)
 @catch_state_errors
 async def process_contact(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    await state.update_data(contact_person=message.text)
-    await message.answer(
-        "✅ <b>Контактное лицо сохранено</b>\n\n"
-        "<b>Введите телефон для связи:</b>\n"
-        "<i>Например: +7 999 123-45-67</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_phone)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        if len(message.text.strip()) < 2:
+            await message.answer("❌ Контактное лицо должно содержать минимум 2 символа. Введите снова:")
+            return
+        
+        await state.update_data(contact_person=message.text.strip())
+        await message.answer(
+            "✅ <b>Контактное лицо сохранено</b>\n\n"
+            "<b>Введите телефон для связи:</b>\n"
+            "<i>Пример: +7 999 123-45-67 или 8-999-123-45-67</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_phone)
+    except Exception as e:
+        logger.error(f"Ошибка в process_contact: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении контактного лица. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_phone)
 @catch_state_errors
 async def process_phone(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    await state.update_data(phone=message.text)
-    await message.answer(
-        "✅ <b>Телефон сохранен</b>\n\n"
-        "<b>Введите email:</b>\n"
-        "<i>На этот адрес придет выгрузка</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_email)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        phone = message.text.strip()
+        # Простая валидация телефона
+        digits = sum(c.isdigit() for c in phone)
+        if digits < 10:
+            await message.answer("❌ Телефон должен содержать минимум 10 цифр. Введите снова:")
+            return
+        
+        await state.update_data(phone=phone)
+        await message.answer(
+            "✅ <b>Телефон сохранен</b>\n\n"
+            "<b>Введите email:</b>\n"
+            "<i>На этот адрес придет выгрузка тендеров</i>\n"
+            "<i>Пример: example@company.ru</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_email)
+    except Exception as e:
+        logger.error(f"Ошибка в process_phone: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении телефона. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_email)
 @catch_state_errors
 async def process_email(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    
-    email = message.text.strip()
-    if "@" not in email or "." not in email:
-        await message.answer("❌ Введите корректный email адрес:")
-        return
-    
-    await state.update_data(email=email)
-    await message.answer(
-        "✅ <b>Email сохранен</b>\n\n"
-        "<b>Введите сферу деятельности:</b>\n"
-        "<i>Например: Строительство, ОКВЭД 41.20</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_activity)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        email = message.text.strip().lower()
+        if '@' not in email or '.' not in email or len(email) < 5:
+            await message.answer("❌ Введите корректный email адрес. Пример: example@company.ru")
+            return
+        
+        await state.update_data(email=email)
+        await message.answer(
+            "✅ <b>Email сохранен</b>\n\n"
+            "<b>Введите сферу деятельности компании:</b>\n"
+            "<i>Пример: Строительство, ОКВЭД 41.20</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_activity)
+    except Exception as e:
+        logger.error(f"Ошибка в process_email: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении email. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_activity)
 @catch_state_errors
 async def process_activity(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    await state.update_data(activity_sphere=message.text)
-    await message.answer(
-        "✅ <b>Сфера деятельности сохранена</b>\n\n"
-        "<b>Введите ключевые слова для поиска:</b>\n"
-        "<i>Чем занимается ваша компания (через запятую)</i>\n"
-        "<i>Пример: строительство, ремонт, отделка</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_industry)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        if len(message.text.strip()) < 2:
+            await message.answer("❌ Сфера деятельности должна содержать минимум 2 символа. Введите снова:")
+            return
+        
+        await state.update_data(activity_sphere=message.text.strip())
+        await message.answer(
+            "✅ <b>Сфера деятельности сохранена</b>\n\n"
+            "<b>Введите ключевые слова для поиска тендеров:</b>\n"
+            "<i>Чем занимается ваша компания (через запятую)</i>\n"
+            "<i>Пример: строительство, ремонт, отделка, монтаж</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_industry)
+    except Exception as e:
+        logger.error(f"Ошибка в process_activity: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении сферы деятельности. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_industry)
 @catch_state_errors
 async def process_industry(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    await state.update_data(industry=message.text)
-    await message.answer(
-        "✅ <b>Ключевые слова сохранены</b>\n\n"
-        "<b>Введите желаемый бюджет контрактов:</b>\n"
-        "<i>Пример: от 100 000 до 500 000 рублей</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_amount)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        if len(message.text.strip()) < 2:
+            await message.answer("❌ Ключевые слова должны содержать минимум 2 символа. Введите снова:")
+            return
+        
+        await state.update_data(industry=message.text.strip())
+        await message.answer(
+            "✅ <b>Ключевые слова сохранены</b>\n\n"
+            "<b>Введите желаемый бюджет контрактов:</b>\n"
+            "<i>Пример: от 100 000 до 500 000 рублей</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_amount)
+    except Exception as e:
+        logger.error(f"Ошибка в process_industry: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении ключевых слов. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_amount)
 @catch_state_errors
 async def process_amount(message: types.Message, state: FSMContext):
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    await state.update_data(contract_amount=message.text)
-    await message.answer(
-        "✅ <b>Бюджет сохранен</b>\n\n"
-        "<b>Введите регионы работы:</b>\n"
-        "<i>В каких регионах готовы работать (через запятую)</i>\n"
-        "<i>Пример: Москва, Московская область, Владимир</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    await state.set_state(Questionnaire.waiting_for_regions)
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        if len(message.text.strip()) < 2:
+            await message.answer("❌ Бюджет должен содержать минимум 2 символа. Введите снова:")
+            return
+        
+        await state.update_data(contract_amount=message.text.strip())
+        await message.answer(
+            "✅ <b>Бюджет сохранен</b>\n\n"
+            "<b>Введите регионы работы через запятую:</b>\n"
+            "<i>В каких регионах готовы работать</i>\n"
+            "<i>Пример: Москва, Московская область, Владимир</i>",
+            reply_markup=get_cancel_keyboard()
+        )
+        await state.set_state(Questionnaire.waiting_for_regions)
+    except Exception as e:
+        logger.error(f"Ошибка в process_amount: {e}", exc_info=True)
+        await message.answer(
+            "❌ Ошибка при сохранении бюджета. Введите снова:",
+            reply_markup=get_cancel_keyboard()
+        )
 
 @dp.message(Questionnaire.waiting_for_regions)
 @catch_state_errors
 async def process_regions(message: types.Message, state: FSMContext):
     """Завершение заполнения анкеты"""
-    if message.text == "❌ Отменить":
-        await cancel_action(message, state)
-        return
-    
-    user_data = await state.get_data()
-    
-    # Добавляем информацию о пользователе
-    user_data['user_id'] = message.from_user.id
-    user_data['username'] = message.from_user.username or "Не указан"
-    user_data['regions'] = message.text
-    
-    # Сохраняем в базу данных
-    questionnaire_id = save_questionnaire_to_db(user_data)
-    
-    if questionnaire_id:
-        # Отправляем подтверждение пользователю
-        await message.answer(
-            "✅ <b>Запрос получен!</b>\n\n"
-            "Благодарим вас за обращение в наш сервис. Мы уже начали поиск тендеров по вашим параметрам.\n\n"
-            "Обработка запроса и формирование персональной подборки займет не более 1-го часа.\n"
-            "Как только выгрузка будет готова, мы пришлем ее в этот чат.\n\n"
-            "<b>Следите за обновлениями!</b>\n"
-            "—\n"
-            "Всегда на связи, команда ТРИТИКА.\n"
-            "Телефон: +7 (904) 653-69-87\n"
-            "Сайт: https://tritika.ru/\n"
-            "E-mail: info@tritika.ru",
-            reply_markup=get_main_keyboard()
-        )
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
         
-        # Отправляем уведомление админу
-        admin_message = f"""
-        🆕 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
+        if len(message.text.strip()) < 2:
+            await message.answer("❌ Регионы должны содержать минимум 2 символа. Введите снова:")
+            return
         
-        <b>👤 Данные клиента:</b>
-        • ID пользователя: {user_data['user_id']}
-        • Username: @{user_data['username']}
-        • ФИО: {user_data['full_name']}
-        • Компания: {user_data['company_name']}
-        • ИНН: {user_data['inn']}
-        • Контакт: {user_data['contact_person']}
-        • Телефон: {user_data['phone']}
-        • Email: {user_data['email']}
+        user_data = await state.get_data()
         
-        <b>📊 Параметры поиска:</b>
-        • Сфера: {user_data['activity_sphere']}
-        • Ключевые слова: {user_data['industry']}
-        • Бюджет: {user_data['contract_amount']}
-        • Регионы: {user_data['regions']}
+        # Добавляем информацию о пользователе
+        user_data['user_id'] = message.from_user.id
+        user_data['username'] = message.from_user.username or "Не указан"
+        user_data['regions'] = message.text.strip()
         
-        <b>⏰ Время подачи:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+        # Сохраняем в базу данных
+        questionnaire_id = save_questionnaire_to_db(user_data)
         
-        <i>Для отправки файла используйте кнопку "📁 Отправить файл клиенту" или команду /send_file_{user_data['user_id']}</i>
-        """
+        if questionnaire_id:
+            # Отправляем подтверждение пользователю
+            await message.answer(
+                "✅ <b>Запрос получен!</b>\n\n"
+                "Благодарим вас за обращение в наш сервис. Мы уже начали поиск тендеров по вашим параметрам.\n\n"
+                "Обработка запроса и формирование персональной подборки займет не более 1-го часа.\n"
+                "Как только выгрузка будет готова, мы пришлем ее в этот чат.\n\n"
+                "<b>Следите за обновлениями!</b>\n"
+                "—\n"
+                "Всегда на связи, команда ТРИТИКА.\n"
+                "Телефон: +7 (904) 653-69-87\n"
+                "Сайт: https://tritika.ru/\n"
+                "E-mail: info@tritika.ru",
+                reply_markup=get_main_keyboard()
+            )
+            
+            # Отправляем уведомление админу
+            admin_message = f"""
+            🆕 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
+            
+            <b>👤 Данные клиента:</b>
+            • ID пользователя: {user_data['user_id']}
+            • Username: @{user_data['username']}
+            • ФИО: {user_data['full_name']}
+            • Компания: {user_data['company_name']}
+            • ИНН: {user_data['inn']}
+            • Контакт: {user_data['contact_person']}
+            • Телефон: {user_data['phone']}
+            • Email: {user_data['email']}
+            
+            <b>📊 Параметры поиска:</b>
+            • Сфера: {user_data['activity_sphere']}
+            • Ключевые слова: {user_data['industry']}
+            • Бюджет: {user_data['contract_amount']}
+            • Регионы: {user_data['regions']}
+            
+            <b>⏰ Время подачи:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+            
+            <i>Для отправки файла используйте кнопку "📁 Отправить файл клиенту" или команду /send_file_{user_data['user_id']}</i>
+            """
+            
+            try:
+                await bot.send_message(ADMIN_ID, admin_message)
+                logger.info(f"✅ Анкета #{questionnaire_id} отправлена админу")
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки админу: {e}")
+        else:
+            await message.answer(
+                "❌ Произошла ошибка при сохранении анкеты. Пожалуйста, попробуйте позже.",
+                reply_markup=get_main_keyboard()
+            )
         
-        try:
-            await bot.send_message(ADMIN_ID, admin_message)
-            logger.info(f"✅ Анкета #{questionnaire_id} отправлена админу")
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки админу: {e}")
-    else:
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в process_regions: {e}", exc_info=True)
         await message.answer(
             "❌ Произошла ошибка при сохранении анкеты. Пожалуйста, попробуйте позже.",
             reply_markup=get_main_keyboard()
         )
-    
-    await state.clear()
+        await state.clear()
+
+# =========== ОБРАТНАЯ СВЯЗЬ ОТ ПОЛЬЗОВАТЕЛЯ ===========
+@dp.message(F.text == "💬 Оставить отзыв")
+@catch_state_errors
+async def start_feedback(message: types.Message, state: FSMContext):
+    """Начало оставления отзыва"""
+    try:
+        # Проверяем, заполнял ли пользователь анкету
+        questionnaire = get_questionnaire_by_user_id(message.from_user.id)
+        
+        if not questionnaire:
+            await message.answer(
+                "📝 <b>Сначала заполните анкету!</b>\n\n"
+                "Чтобы оставить отзыв о нашей работе, сначала необходимо заполнить анкету для поиска тендеров.",
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        # Проверяем, оставлял ли уже отзыв
+        if questionnaire[16]:  # feedback_given
+            await message.answer(
+                "✅ <b>Вы уже оставляли отзыв!</b>\n\n"
+                "Спасибо за вашу обратную связь! Мы ценим ваше мнение.",
+                reply_markup=get_main_keyboard()
+            )
+            return
+        
+        await message.answer(
+            "💬 <b>Оставить отзыв</b>\n\n"
+            "Пожалуйста, оцените нашу работу:\n"
+            "• Устроило ли вас качество выгрузки тендеров?\n"
+            "• Была ли информация полезной?\n"
+            "• Какие улучшения вы бы предложили?\n\n"
+            "Выберите вариант ниже:",
+            reply_markup=get_yes_no_keyboard()
+        )
+        await state.set_state(UserFeedback.waiting_for_feedback)
+    except Exception as e:
+        logger.error(f"Ошибка в start_feedback: {e}", exc_info=True)
+        await message.answer(
+            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+
+@dp.message(UserFeedback.waiting_for_feedback)
+@catch_state_errors
+async def process_feedback_choice(message: types.Message, state: FSMContext):
+    """Обработка выбора оценки"""
+    try:
+        if message.text == "❌ Отменить":
+            await cancel_action(message, state)
+            return
+        
+        if message.text not in ["✅ Да, все отлично", "❌ Есть замечания"]:
+            await message.answer("Пожалуйста, выберите один из предложенных вариантов:")
+            return
+        
+        is_positive = message.text == "✅ Да, все отлично"
+        await state.update_data(feedback_choice=is_positive)
+        
+        if is_positive:
+            await message.answer(
+                "🎉 <b>Отлично! Рады, что вы довольны!</b>\n\n"
+                "Пожалуйста, напишите пару слов о том, что вам понравилось:",
+                reply_markup=get_cancel_keyboard()
+            )
+        else:
+            await message.answer(
+                "📝 <b>Спасибо за честность!</b>\n\n"
+                "Пожалуйста, опишите, что можно улучшить в нашей работе:",
+                reply_markup=get_cancel_keyboard()
+            )
+        
+        await state.set_state(UserFeedback.waiting_for_feedback)
+    except Exception as e:
+        logger.error(f"Ошибка в process_feedback_choice: {e}", exc_info=True)
+        await message.answer(
+            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+
+@dp.message(UserFeedback.waiting_for_feedback, F.text != "❌ Отменить")
+@catch_state_errors
+async def process_feedback_text(message: types.Message, state: FSMContext):
+    """Обработка текста отзыва"""
+    try:
+        if len(message.text.strip()) < 5:
+            await message.answer("❌ Отзыв должен содержать минимум 5 символов. Пожалуйста, напишите подробнее:")
+            return
+        
+        data = await state.get_data()
+        is_positive = data.get('feedback_choice', True)
+        
+        # Сохраняем отзыв
+        feedback_text = f"{'✅ Положительный: ' if is_positive else '❌ Критика: '}{message.text}"
+        success = save_feedback(message.from_user.id, feedback_text, is_positive)
+        
+        if success:
+            await message.answer(
+                "🙏 <b>Спасибо за ваш отзыв!</b>\n\n"
+                "Ваше мнение очень важно для нас. Мы обязательно учтем ваши пожелания для улучшения нашего сервиса.\n\n"
+                "Если у вас есть дополнительные вопросы или предложения, не стесняйтесь написать нам!",
+                reply_markup=get_main_keyboard()
+            )
+            
+            # Уведомляем админа
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"💬 <b>НОВЫЙ ОТЗЫВ ОТ ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+                    f"👤 Пользователь: @{message.from_user.username or 'не указан'} (ID: {message.from_user.id})\n"
+                    f"📝 Отзыв: {feedback_text}\n\n"
+                    f"⏰ Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                )
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки уведомления админу: {e}")
+        else:
+            await message.answer(
+                "❌ Произошла ошибка при сохранении отзыва. Пожалуйста, попробуйте позже.",
+                reply_markup=get_main_keyboard()
+            )
+        
+        await state.clear()
+        
+    except Exception as e:
+        logger.error(f"Ошибка в process_feedback_text: {e}", exc_info=True)
+        await message.answer(
+            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+        await state.clear()
 
 # =========== АДМИН: ПРОСМОТР ЗАЯВОК ===========
 @dp.message(F.text == "📊 Все заявки")
@@ -651,18 +1160,25 @@ async def admin_all_requests(message: types.Message):
     
     response = f"📊 <b>Все заявки (страница 1/{total_pages}):</b>\n\n"
     
-    for q in questionnaires:
+    for q in questionnaires[:5]:  # Показываем только первые 5
         status_icon = "🆕" if q[13] == "new" else "✅" if q[13] == "processed" else "📁"
+        feedback_icon = "💬" if q[16] else "💭"
         response += f"""
         <b>#{q[0]}</b> - {q[3]} ({q[4]})
         👤 ID: {q[1]} | @{q[2]}
         📅 {q[14][:10]}
-        {status_icon} Статус: {q[13]}
+        {status_icon} Статус: {q[13]} | {feedback_icon} Отзыв: {'Да' if q[16] else 'Нет'}
         ──────────────────────
         """
     
+    if len(questionnaires) > 5:
+        response += f"\n... и еще {len(questionnaires) - 5} заявок"
+    
     keyboard = get_pagination_keyboard(1, total_pages)
-    await message.answer(response, reply_markup=keyboard)
+    if keyboard:
+        await message.answer(response, reply_markup=keyboard)
+    else:
+        await message.answer(response, reply_markup=get_admin_keyboard())
 
 @dp.callback_query(F.data.startswith("page_"))
 async def handle_pagination(callback: types.CallbackQuery):
@@ -682,11 +1198,12 @@ async def handle_pagination(callback: types.CallbackQuery):
         
         for q in questionnaires:
             status_icon = "🆕" if q[13] == "new" else "✅" if q[13] == "processed" else "📁"
+            feedback_icon = "💬" if q[16] else "💭"
             response += f"""
             <b>#{q[0]}</b> - {q[3]} ({q[4]})
             👤 ID: {q[1]} | @{q[2]}
             📅 {q[14][:10]}
-            {status_icon} Статус: {q[13]}
+            {status_icon} Статус: {q[13]} | {feedback_icon} Отзыв: {'Да' if q[16] else 'Нет'}
             ──────────────────────
             """
         
@@ -712,7 +1229,7 @@ async def admin_new_requests(message: types.Message):
     
     response = "🆕 <b>Новые заявки:</b>\n\n"
     
-    for q in questionnaires:
+    for q in questionnaires[:10]:  # Ограничиваем 10 заявками
         response += f"""
         <b>#{q[0]}</b> - {q[3]}
         👤 ID: {q[1]} | @{q[2]}
@@ -723,6 +1240,9 @@ async def admin_new_requests(message: types.Message):
         Для отправки файла: /send_file_{q[1]}
         ──────────────────────
         """
+    
+    if len(questionnaires) > 10:
+        response += f"\n... и еще {len(questionnaires) - 10} новых заявок"
     
     await message.answer(response, reply_markup=get_admin_keyboard())
 
@@ -934,6 +1454,257 @@ async def quick_send_file_command(message: types.Message, state: FSMContext):
     except ValueError:
         await message.answer("❌ Некорректный ID. Введите число.")
 
+# =========== АДМИН: РАССЫЛКА ===========
+@dp.message(F.text == "📤 Сделать рассылку")
+async def admin_start_mailing(message: types.Message, state: FSMContext):
+    """Начало создания рассылки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    # Проверяем, активна ли уже рассылка
+    global mailing_data
+    if mailing_data['active']:
+        await message.answer(
+            f"⚠️ <b>Рассылка уже активна!</b>\n\n"
+            f"Прогресс: {mailing_data['sent_count']} отправлено\n"
+            f"Ошибок: {mailing_data['error_count']}\n"
+            f"Время начала: {mailing_data['start_time'].strftime('%H:%M:%S') if mailing_data['start_time'] else 'N/A'}\n\n"
+            f"Для остановки рассылки отправьте команду /stop_mailing",
+            reply_markup=get_admin_keyboard()
+        )
+        return
+    
+    await message.answer(
+        "📤 <b>Создание рассылки</b>\n\n"
+        "Введите текст сообщения для рассылки всем пользователям:\n\n"
+        "<b>Вы можете использовать HTML-разметку:</b>\n"
+        "• &lt;b&gt;жирный текст&lt;/b&gt;\n"
+        "• &lt;i&gt;курсив&lt;/i&gt;\n"
+        "• &lt;u&gt;подчеркнутый&lt;/u&gt;\n"
+        "• &lt;a href='ссылка'&gt;текст ссылки&lt;/a&gt;\n\n"
+        "<i>Пример:</i>\n"
+        "&lt;b&gt;Новые тендеры!&lt;/b&gt;\n"
+        "Мы нашли для вас новые тендеры по вашим критериям.\n\n"
+        "Напишите текст рассылки:",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(AdminAction.waiting_for_mailing_text)
+
+@dp.message(AdminAction.waiting_for_mailing_text)
+@catch_state_errors
+async def admin_process_mailing_text(message: types.Message, state: FSMContext):
+    """Обработка текста рассылки"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    if len(message.text.strip()) < 10:
+        await message.answer("❌ Текст рассылки должен содержать минимум 10 символов. Введите снова:")
+        return
+    
+    # Получаем количество пользователей
+    users = get_all_users()
+    total_users = len(users)
+    
+    if total_users == 0:
+        await message.answer("❌ Нет пользователей для рассылки.", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
+    
+    # Сохраняем текст рассылки
+    mailing_text = message.text.strip()
+    
+    # Подтверждение перед началом
+    await message.answer(
+        f"✅ <b>Текст рассылки сохранен</b>\n\n"
+        f"<b>Количество получателей:</b> {total_users} пользователей\n\n"
+        f"<b>Предпросмотр:</b>\n"
+        f"{mailing_text[:200]}...\n\n"
+        f"<b>Начать рассылку?</b>\n"
+        f"Нажмите '✅ Да, начать рассылку' для старта или '❌ Отменить' для отмены.",
+        reply_markup=ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="✅ Да, начать рассылку")],
+                [KeyboardButton(text="❌ Отменить")]
+            ],
+            resize_keyboard=True
+        )
+    )
+    
+    await state.update_data(mailing_text=mailing_text, total_users=total_users)
+
+@dp.message(F.text == "✅ Да, начать рассылку")
+async def admin_confirm_mailing(message: types.Message, state: FSMContext):
+    """Подтверждение и запуск рассылки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    data = await state.get_data()
+    mailing_text = data.get('mailing_text')
+    total_users = data.get('total_users', 0)
+    
+    if not mailing_text:
+        await message.answer("❌ Текст рассылки не найден. Начните заново.", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
+    
+    await message.answer(
+        f"🚀 <b>Начинаю рассылку...</b>\n\n"
+        f"Получателей: {total_users}\n"
+        f"Это может занять некоторое время.\n\n"
+        f"<i>Для остановки рассылки отправьте команду /stop_mailing</i>",
+        reply_markup=get_admin_keyboard()
+    )
+    
+    # Запускаем рассылку в фоновом режиме
+    asyncio.create_task(start_mailing_task(mailing_text, message.from_user.id))
+    
+    await state.clear()
+
+@dp.message(Command("stop_mailing"))
+async def stop_mailing_command(message: types.Message):
+    """Остановка активной рассылки"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    global mailing_data
+    if mailing_data['active']:
+        mailing_data['active'] = False
+        await message.answer(
+            "🛑 <b>Рассылка остановлена!</b>\n\n"
+            f"Отправлено сообщений: {mailing_data['sent_count']}\n"
+            f"Ошибок: {mailing_data['error_count']}",
+            reply_markup=get_admin_keyboard()
+        )
+    else:
+        await message.answer("ℹ️ Нет активной рассылки для остановки.", reply_markup=get_admin_keyboard())
+
+# =========== АДМИН: ОТЧЕТ ПО ОТЗЫВАМ ===========
+@dp.message(F.text == "📊 Отчет по отзывам")
+async def admin_feedback_report(message: types.Message):
+    """Показать отчет по отзывам"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    report = get_feedback_report()
+    
+    if not report:
+        await message.answer("❌ Ошибка получения отчета.", reply_markup=get_admin_keyboard())
+        return
+    
+    # Формируем текстовый отчет
+    text_report = f"""
+📊 <b>ОТЧЕТ ПО ОТЗЫВАМ</b>
+
+<b>Общая статистика:</b>
+• Всего пользователей: {report['total_users']}
+• Оставили отзыв: {report['feedback_given']}
+• Без отзыва: {report['no_feedback']}
+• Процент отклика: {(report['feedback_given'] / report['total_users'] * 100 if report['total_users'] > 0 else 0):.1f}%
+
+<b>Действия:</b>
+• Для выгрузки детального отчета в CSV нажмите '📥 Выгрузить CSV'
+• Для просмотра последних отзывов нажмите '👁️ Показать отзывы'
+"""
+    
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📥 Выгрузить CSV"), KeyboardButton(text="👁️ Показать отзывы")],
+            [KeyboardButton(text="🏠 Главное меню")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(text_report, reply_markup=keyboard)
+
+@dp.message(F.text == "📥 Выгрузить CSV")
+async def admin_export_feedback_csv(message: types.Message):
+    """Экспорт отчета в CSV"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    report = get_feedback_report()
+    
+    if not report or not report['detailed_data']:
+        await message.answer("❌ Нет данных для выгрузки.", reply_markup=get_admin_keyboard())
+        return
+    
+    try:
+        # Создаем CSV в памяти
+        output = io.StringIO()
+        writer = csv.writer(output, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
+        
+        # Заголовки
+        writer.writerow([
+            'ID анкеты', 'ID пользователя', 'ФИО', 'Компания', 
+            'Оставил отзыв', 'Дата отзыва', 'Текст отзыва'
+        ])
+        
+        # Данные
+        for row in report['detailed_data']:
+            writer.writerow([
+                row[0], row[1], row[2] or '', row[3] or '',
+                'Да' if row[4] else 'Нет',
+                row[5] or '', row[6] or ''
+            ])
+        
+        # Преобразуем в байты
+        csv_bytes = output.getvalue().encode('utf-8-sig')
+        
+        # Отправляем файл
+        await message.answer_document(
+            types.BufferedInputFile(
+                csv_bytes,
+                filename=f"feedback_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+            ),
+            caption=f"📊 <b>Отчет по отзывам</b>\n\n"
+                   f"Дата выгрузки: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
+                   f"Всего записей: {len(report['detailed_data'])}",
+            reply_markup=get_admin_keyboard()
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка выгрузки CSV: {e}", exc_info=True)
+        await message.answer("❌ Ошибка при создании CSV файла.", reply_markup=get_admin_keyboard())
+
+@dp.message(F.text == "👁️ Показать отзывы")
+async def admin_show_feedback_details(message: types.Message):
+    """Показать детальные отзывы"""
+    if message.from_user.id != ADMIN_ID:
+        return
+    
+    report = get_feedback_report()
+    
+    if not report or not report['detailed_data']:
+        await message.answer("❌ Нет данных об отзывах.", reply_markup=get_admin_keyboard())
+        return
+    
+    # Фильтруем только те, кто оставил отзыв
+    feedbacks = [row for row in report['detailed_data'] if row[4]]  # feedback_given
+    
+    if not feedbacks:
+        await message.answer("ℹ️ Пока никто не оставил отзывов.", reply_markup=get_admin_keyboard())
+        return
+    
+    # Показываем последние 5 отзывов
+    response = "💬 <b>Последние отзывы:</b>\n\n"
+    
+    for i, feedback in enumerate(feedbacks[:5], 1):
+        response += f"""
+        <b>{i}. #{feedback[0]} - {feedback[2] or 'Без имени'}</b>
+        🏢 Компания: {feedback[3] or 'Не указана'}
+        📅 Дата: {feedback[5] or 'Не указана'}
+        📝 Отзыв: {feedback[6] or 'Без текста'}
+        ──────────────────────
+        """
+    
+    if len(feedbacks) > 5:
+        response += f"\n... и еще {len(feedbacks) - 5} отзывов"
+    
+    response += "\n\nДля полной выгрузки нажмите '📥 Выгрузить CSV'"
+    
+    await message.answer(response, reply_markup=get_admin_keyboard())
+
 # =========== ОБЩЕНИЕ МЕЖДУ КЛИЕНТОМ И АДМИНОМ ===========
 @dp.message(F.text == "📨 Написать менеджеру")
 @catch_state_errors
@@ -1100,6 +1871,14 @@ async def admin_statistics(message: types.Message):
         cursor.execute("SELECT COUNT(*) FROM messages")
         messages = cursor.fetchone()[0]
         
+        # Отзывы
+        cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE feedback_given = 1")
+        feedbacks = cursor.fetchone()[0]
+        
+        # Рассылки
+        cursor.execute("SELECT COUNT(*) FROM mailings")
+        mailings = cursor.fetchone()[0]
+        
         # Последняя активность
         cursor.execute("SELECT MAX(created_at) FROM questionnaires")
         last_activity = cursor.fetchone()[0] or "Нет данных"
@@ -1117,6 +1896,8 @@ async def admin_statistics(message: types.Message):
 <b>Активность:</b>
 • Отправлено файлов: {sent_files}
 • Сообщений в чатах: {messages}
+• Получено отзывов: {feedbacks}
+• Проведено рассылок: {mailings}
 
 <b>Последняя активность:</b>
 {last_activity}
@@ -1156,7 +1937,8 @@ async def handle_all_messages(message: types.Message):
             "Используйте кнопки ниже или команды:\n"
             "/start - главное меню\n"
             "/send_file ID - отправить файл клиенту\n"
-            "/reply ID текст - ответить клиенту",
+            "/reply ID текст - ответить клиенту\n"
+            "/stop_mailing - остановить рассылку",
             reply_markup=get_admin_keyboard()
         )
     else:
@@ -1164,9 +1946,101 @@ async def handle_all_messages(message: types.Message):
             "Используйте кнопки ниже:\n"
             "📝 Заполнить анкету - поиск тендеров\n"
             "📨 Написать менеджеру - задать вопрос\n"
+            "💬 Оставить отзыв - поделиться мнением\n"
             "ℹ️ О компании - информация",
             reply_markup=get_main_keyboard()
         )
+
+# =========== АВТОМАТИЧЕСКАЯ РАССЫЛКА КАЖДЫЕ 2 НЕДЕЛИ ===========
+async def scheduled_mailing():
+    """Автоматическая рассылка каждые 2 недели"""
+    while True:
+        try:
+            # Ждем 14 дней (2 недели)
+            await asyncio.sleep(14 * 24 * 60 * 60)
+            
+            # Получаем всех пользователей
+            users = get_all_users()
+            
+            if not users:
+                logger.info("ℹ️ Нет пользователей для автоматической рассылки")
+                continue
+            
+            # Проверяем, когда была последняя рассылка
+            conn = sqlite3.connect('tenders.db', check_same_thread=False)
+            cursor = conn.cursor()
+            cursor.execute("SELECT MAX(mailing_date) FROM mailings")
+            last_mailing_date = cursor.fetchone()[0]
+            conn.close()
+            
+            # Если была рассылка менее 13 дней назад, пропускаем
+            if last_mailing_date:
+                last_date = datetime.strptime(last_mailing_date, "%Y-%m-%d %H:%M:%S")
+                days_passed = (datetime.now() - last_date).days
+                if days_passed < 13:
+                    logger.info(f"ℹ️ Последняя рассылка была {days_passed} дней назад, пропускаем")
+                    continue
+            
+            # Текст для автоматической рассылки
+            mailing_text = """<b>🎯 Важные новости от ТРИТИКА!</b>
+
+Напоминаем, что наш сервис продолжает искать для вас тендеры по вашим параметрам.
+
+<b>Что мы предлагаем:</b>
+• Ежедневный мониторинг новых тендеров
+• Актуальные данные по 44-ФЗ и 223-ФЗ
+• Консультации по участию
+
+<b>Нужна новая выгрузка?</b>
+Ответьте на это сообщение или нажмите "📨 Написать менеджеру".
+
+С уважением, команда ТРИТИКА.
+📞 +7 (904) 653-69-87
+🌐 https://tritika.ru/"""
+            
+            logger.info(f"🚀 Запускаю автоматическую рассылку для {len(users)} пользователей")
+            
+            # Отправляем рассылку
+            successful = 0
+            failed = 0
+            
+            for user_id in users:
+                try:
+                    await bot.send_message(
+                        user_id,
+                        mailing_text,
+                        parse_mode=ParseMode.HTML
+                    )
+                    successful += 1
+                    update_last_mailing_date(user_id)
+                except Exception as e:
+                    failed += 1
+                    logger.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
+                
+                # Задержка между отправками
+                await asyncio.sleep(0.1)
+            
+            # Сохраняем статистику
+            save_mailing_stats(len(users), successful, failed, "Автоматическая рассылка")
+            
+            logger.info(f"✅ Автоматическая рассылка завершена: {successful} успешно, {failed} ошибок")
+            
+            # Отправляем отчет админу
+            try:
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"📊 <b>Автоматическая рассылка завершена</b>\n\n"
+                    f"• Всего пользователей: {len(users)}\n"
+                    f"• Успешно отправлено: {successful}\n"
+                    f"• С ошибками: {failed}\n"
+                    f"• Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+                )
+            except Exception as e:
+                logger.error(f"❌ Ошибка отправки отчета админу: {e}")
+                
+        except Exception as e:
+            logger.error(f"❌ Ошибка в scheduled_mailing: {e}", exc_info=True)
+            await asyncio.sleep(3600)  # Ждем час при ошибке
 
 # =========== ПРОСТОЙ HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -1201,10 +2075,14 @@ async def run_bot():
         bot_info = await bot.get_me()
         logger.info(f"✅ Бот запущен: @{bot_info.username}")
         
+        # Запускаем автоматическую рассылку в фоне
+        asyncio.create_task(scheduled_mailing())
+        logger.info("✅ Запущена автоматическая рассылка (каждые 2 недели)")
+        
         # Запускаем бота
         await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
-        logger.error(f"❌ Ошибка запуска бота: {e}")
+        logger.error(f"❌ Ошибка запуска бота: {e}", exc_info=True)
         raise
 
 def main():
@@ -1227,7 +2105,7 @@ def main():
     except KeyboardInterrupt:
         logger.info("🛑 Бот остановлен пользователем")
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}")
+        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
         sys.exit(1)
 
 # =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
