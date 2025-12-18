@@ -2,9 +2,10 @@ import os
 import sqlite3
 import logging
 import asyncio
-from datetime import datetime
+import shutil
+from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher, types, F
-from aiogram.filters import Command, StateFilter
+from aiogram.filters import Command, StateFilter, BaseFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -17,29 +18,31 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiohttp import web
+import aiohttp
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log', encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
-# Получаем токен и ID админа
+# Получаем токен и ID админа из переменных окружения
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_ID = os.getenv("ADMIN_ID")
 
 if not BOT_TOKEN:
     logger.error("❌ BOT_TOKEN не установлен! Добавьте в Secrets.")
-    BOT_TOKEN = input("Введите BOT_TOKEN: ").strip()
-    if not BOT_TOKEN:
-        exit(1)
+    exit(1)
 
 if not ADMIN_ID:
     logger.error("❌ ADMIN_ID не установлен! Добавьте в Secrets.")
-    ADMIN_ID = input("Введите ваш Telegram ID: ").strip()
-    if not ADMIN_ID:
-        exit(1)
+    exit(1)
 
 ADMIN_ID = int(ADMIN_ID)
 
@@ -50,6 +53,74 @@ bot = Bot(
 )
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
+
+# Антифлуд фильтр
+class AntiFlood(BaseFilter):
+    def __init__(self, seconds: int = 2):
+        self.seconds = seconds
+        self.users = {}
+
+    async def __call__(self, message: types.Message) -> bool:
+        user_id = message.from_user.id
+        current_time = datetime.now()
+        
+        if user_id in self.users:
+            last_time = self.users[user_id]
+            if (current_time - last_time).seconds < self.seconds:
+                return False
+        
+        self.users[user_id] = current_time
+        return True
+
+# Валидация ИНН
+def validate_inn(inn: str) -> bool:
+    """Проверка валидности ИНН"""
+    if len(inn) not in (10, 12) or not inn.isdigit():
+        return False
+    
+    if len(inn) == 10:
+        # Проверка контрольной цифры для 10-значного ИНН
+        weights = [2, 4, 10, 3, 5, 9, 4, 6, 8]
+        check_sum = sum(int(inn[i]) * weights[i] for i in range(9)) % 11
+        check_digit = check_sum % 10 if check_sum < 10 else 0
+        return int(inn[9]) == check_digit
+    return True
+
+# Декоратор для обработки ошибок в состояниях
+def catch_state_errors(func):
+    """Декоратор для обработки ошибок в состояниях"""
+    async def wrapper(message: types.Message, state: FSMContext, *args, **kwargs):
+        try:
+            return await func(message, state, *args, **kwargs)
+        except Exception as e:
+            logger.error(f"Ошибка в состоянии: {e}")
+            await state.clear()
+            keyboard = get_admin_keyboard() if message.from_user.id == ADMIN_ID else get_main_keyboard()
+            await message.answer(
+                "⚠️ Произошла ошибка. Возврат в главное меню.",
+                reply_markup=keyboard
+            )
+    return wrapper
+
+# Резервное копирование базы данных
+def backup_database():
+    """Создание резервной копии базы данных"""
+    try:
+        os.makedirs("backups", exist_ok=True)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        backup_name = f"backups/tenders_backup_{timestamp}.db"
+        
+        if os.path.exists("tenders.db"):
+            shutil.copy2("tenders.db", backup_name)
+            logger.info(f"✅ Резервная копия создана: {backup_name}")
+            
+            # Удаляем старые бекапы (оставляем последние 7)
+            backups = sorted([f for f in os.listdir("backups") if f.startswith("tenders_backup")])
+            if len(backups) > 7:
+                for old_backup in backups[:-7]:
+                    os.remove(f"backups/{old_backup}")
+    except Exception as e:
+        logger.error(f"❌ Ошибка создания резервной копии: {e}")
 
 # Инициализация базы данных
 def init_db():
@@ -102,9 +173,11 @@ def init_db():
     
     conn.commit()
     conn.close()
+    logger.info("✅ База данных инициализирована")
 
 # Инициализируем БД
 init_db()
+backup_database()
 
 # =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
@@ -123,6 +196,7 @@ class AdminAction(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_file = State()
     waiting_for_message = State()
+    waiting_for_file_with_id = State()
 
 # =========== КЛАВИАТУРЫ ===========
 def get_main_keyboard():
@@ -156,6 +230,16 @@ def get_cancel_keyboard():
         resize_keyboard=True
     )
     return keyboard
+
+def get_pagination_keyboard(page: int, total_pages: int):
+    """Клавиатура для пагинации"""
+    buttons = []
+    if page > 1:
+        buttons.append(InlineKeyboardButton(text="⬅️ Назад", callback_data=f"page_{page-1}"))
+    if page < total_pages:
+        buttons.append(InlineKeyboardButton(text="Вперёд ➡️", callback_data=f"page_{page+1}"))
+    
+    return InlineKeyboardMarkup(inline_keyboard=[buttons]) if buttons else None
 
 # =========== ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ===========
 def save_questionnaire_to_db(user_data):
@@ -194,23 +278,35 @@ def save_questionnaire_to_db(user_data):
         logger.error(f"Ошибка сохранения в БД: {e}")
         return None
 
-def get_questionnaires(status=None):
-    """Получаем заявки из базы"""
+def get_questionnaires(status=None, page=1, per_page=10):
+    """Получаем заявки из базы с пагинацией"""
     try:
         conn = sqlite3.connect('tenders.db', check_same_thread=False)
         cursor = conn.cursor()
         
         if status:
-            cursor.execute("SELECT * FROM questionnaires WHERE status = ? ORDER BY created_at DESC", (status,))
+            cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE status = ?", (status,))
+            total = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT * FROM questionnaires WHERE status = ? ORDER BY created_at DESC LIMIT ? OFFSET ?", 
+                (status, per_page, (page-1)*per_page)
+            )
         else:
-            cursor.execute("SELECT * FROM questionnaires ORDER BY created_at DESC")
+            cursor.execute("SELECT COUNT(*) FROM questionnaires")
+            total = cursor.fetchone()[0]
+            cursor.execute(
+                "SELECT * FROM questionnaires ORDER BY created_at DESC LIMIT ? OFFSET ?", 
+                (per_page, (page-1)*per_page)
+            )
         
         questionnaires = cursor.fetchall()
         conn.close()
-        return questionnaires
+        
+        total_pages = (total + per_page - 1) // per_page
+        return questionnaires, total, total_pages
     except Exception as e:
         logger.error(f"Ошибка получения заявок: {e}")
-        return []
+        return [], 0, 0
 
 def get_questionnaire_by_user_id(user_id):
     """Получаем последнюю анкету пользователя"""
@@ -299,7 +395,8 @@ async def main_menu(message: types.Message):
         await message.answer("Главное меню:", reply_markup=get_main_keyboard())
 
 # =========== ЗАПОЛНЕНИЕ АНКЕТЫ (ПОЛЬЗОВАТЕЛЬ) ===========
-@dp.message(F.text == "📝 Заполнить анкету")
+@dp.message(AntiFlood(2), F.text == "📝 Заполнить анкету")
+@catch_state_errors
 async def start_questionnaire(message: types.Message, state: FSMContext):
     """Начало заполнения анкеты"""
     # Проверяем, не заполняется ли уже анкета
@@ -317,7 +414,11 @@ async def start_questionnaire(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_name)
 
 @dp.message(Questionnaire.waiting_for_name)
+@catch_state_errors
 async def process_name(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
     await state.update_data(full_name=message.text)
     await message.answer(
         "✅ <b>ФИО сохранено</b>\n\n"
@@ -327,7 +428,11 @@ async def process_name(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_company)
 
 @dp.message(Questionnaire.waiting_for_company)
+@catch_state_errors
 async def process_company(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
     await state.update_data(company_name=message.text)
     await message.answer(
         "✅ <b>Название компании сохранено</b>\n\n"
@@ -338,10 +443,15 @@ async def process_company(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_inn)
 
 @dp.message(Questionnaire.waiting_for_inn)
+@catch_state_errors
 async def process_inn(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
     inn = message.text.strip()
-    if not inn.isdigit() or len(inn) not in [10, 12]:
-        await message.answer("❌ ИНН должен содержать 10 или 12 цифр. Введите снова:")
+    if not validate_inn(inn):
+        await message.answer("❌ Неверный ИНН. ИНН должен содержать 10 или 12 цифр. Введите снова:")
         return
     
     await state.update_data(inn=inn)
@@ -354,7 +464,11 @@ async def process_inn(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_contact)
 
 @dp.message(Questionnaire.waiting_for_contact)
+@catch_state_errors
 async def process_contact(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
     await state.update_data(contact_person=message.text)
     await message.answer(
         "✅ <b>Контактное лицо сохранено</b>\n\n"
@@ -365,7 +479,11 @@ async def process_contact(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_phone)
 
 @dp.message(Questionnaire.waiting_for_phone)
+@catch_state_errors
 async def process_phone(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
     await state.update_data(phone=message.text)
     await message.answer(
         "✅ <b>Телефон сохранен</b>\n\n"
@@ -376,7 +494,12 @@ async def process_phone(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_email)
 
 @dp.message(Questionnaire.waiting_for_email)
+@catch_state_errors
 async def process_email(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
     email = message.text.strip()
     if "@" not in email or "." not in email:
         await message.answer("❌ Введите корректный email адрес:")
@@ -392,7 +515,11 @@ async def process_email(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_activity)
 
 @dp.message(Questionnaire.waiting_for_activity)
+@catch_state_errors
 async def process_activity(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
     await state.update_data(activity_sphere=message.text)
     await message.answer(
         "✅ <b>Сфера деятельности сохранена</b>\n\n"
@@ -404,7 +531,11 @@ async def process_activity(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_industry)
 
 @dp.message(Questionnaire.waiting_for_industry)
+@catch_state_errors
 async def process_industry(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
     await state.update_data(industry=message.text)
     await message.answer(
         "✅ <b>Ключевые слова сохранены</b>\n\n"
@@ -415,7 +546,11 @@ async def process_industry(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_amount)
 
 @dp.message(Questionnaire.waiting_for_amount)
+@catch_state_errors
 async def process_amount(message: types.Message, state: FSMContext):
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
     await state.update_data(contract_amount=message.text)
     await message.answer(
         "✅ <b>Бюджет сохранен</b>\n\n"
@@ -427,8 +562,13 @@ async def process_amount(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_regions)
 
 @dp.message(Questionnaire.waiting_for_regions)
+@catch_state_errors
 async def process_regions(message: types.Message, state: FSMContext):
     """Завершение заполнения анкеты"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
     user_data = await state.get_data()
     
     # Добавляем информацию о пользователе
@@ -500,15 +640,15 @@ async def admin_all_requests(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     
-    questionnaires = get_questionnaires()
+    questionnaires, total, total_pages = get_questionnaires(page=1)
     
     if not questionnaires:
         await message.answer("📭 Заявок пока нет.", reply_markup=get_admin_keyboard())
         return
     
-    response = "📊 <b>Все заявки:</b>\n\n"
+    response = f"📊 <b>Все заявки (страница 1/{total_pages}):</b>\n\n"
     
-    for q in questionnaires[:10]:  # Ограничиваем 10 заявками
+    for q in questionnaires:
         status_icon = "🆕" if q[13] == "new" else "✅" if q[13] == "processed" else "📁"
         response += f"""
         <b>#{q[0]}</b> - {q[3]} ({q[4]})
@@ -518,11 +658,42 @@ async def admin_all_requests(message: types.Message):
         ──────────────────────
         """
     
-    if len(questionnaires) > 10:
-        response += f"\n... и еще {len(questionnaires) - 10} заявок"
+    keyboard = get_pagination_keyboard(1, total_pages)
+    await message.answer(response, reply_markup=keyboard)
+
+@dp.callback_query(F.data.startswith("page_"))
+async def handle_pagination(callback: types.CallbackQuery):
+    """Обработка пагинации"""
+    if callback.from_user.id != ADMIN_ID:
+        return
     
-    response += "\n\nДля отправки файла: /send_file_ID"
-    await message.answer(response, reply_markup=get_admin_keyboard())
+    try:
+        page = int(callback.data.split("_")[1])
+        questionnaires, total, total_pages = get_questionnaires(page=page)
+        
+        if not questionnaires:
+            await callback.answer("Нет заявок на этой странице")
+            return
+        
+        response = f"📊 <b>Все заявки (страница {page}/{total_pages}):</b>\n\n"
+        
+        for q in questionnaires:
+            status_icon = "🆕" if q[13] == "new" else "✅" if q[13] == "processed" else "📁"
+            response += f"""
+            <b>#{q[0]}</b> - {q[3]} ({q[4]})
+            👤 ID: {q[1]} | @{q[2]}
+            📅 {q[14][:10]}
+            {status_icon} Статус: {q[13]}
+            ──────────────────────
+            """
+        
+        keyboard = get_pagination_keyboard(page, total_pages)
+        await callback.message.edit_text(response, reply_markup=keyboard)
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка пагинации: {e}")
+        await callback.answer("Ошибка пагинации")
 
 @dp.message(F.text == "🆕 Новые заявки")
 async def admin_new_requests(message: types.Message):
@@ -530,7 +701,7 @@ async def admin_new_requests(message: types.Message):
     if message.from_user.id != ADMIN_ID:
         return
     
-    questionnaires = get_questionnaires("new")
+    questionnaires = get_questionnaires("new")[0]
     
     if not questionnaires:
         await message.answer("🆕 Новых заявок нет.", reply_markup=get_admin_keyboard())
@@ -567,8 +738,13 @@ async def admin_send_file_start(message: types.Message, state: FSMContext):
     await state.set_state(AdminAction.waiting_for_user_id)
 
 @dp.message(AdminAction.waiting_for_user_id)
+@catch_state_errors
 async def admin_get_file_user_id(message: types.Message, state: FSMContext):
     """Получаем ID пользователя для отправки файла"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
     try:
         user_id = int(message.text)
         await state.update_data(target_user_id=user_id)
@@ -581,23 +757,43 @@ async def admin_get_file_user_id(message: types.Message, state: FSMContext):
                 f"✅ Найден пользователь:\n"
                 f"👤 ФИО: {questionnaire[3]}\n"
                 f"🏢 Компания: {questionnaire[4]}\n\n"
-                f"Теперь отправьте файл (PDF, Word, Excel или архив):"
+                f"Теперь отправьте файл (PDF, Word, Excel или архив):",
+                reply_markup=get_cancel_keyboard()
             )
         else:
             await message.answer(
                 f"👤 Пользователь найден (ID: {user_id})\n\n"
-                f"Теперь отправьте файл (PDF, Word, Excel или архив):"
+                f"Теперь отправьте файл (PDF, Word, Excel или архив):",
+                reply_markup=get_cancel_keyboard()
             )
         
         await state.set_state(AdminAction.waiting_for_file)
     except ValueError:
         await message.answer("❌ Введите корректный ID (число):")
 
-@dp.message(AdminAction.waiting_for_file, F.document | F.photo)
+@dp.message(AdminAction.waiting_for_file)
+@catch_state_errors
+async def handle_waiting_for_file(message: types.Message, state: FSMContext):
+    """Обработка файла от админа"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    if not message.document and not message.photo:
+        await message.answer("Пожалуйста, отправьте файл (документ или фото) или нажмите '❌ Отменить'")
+        return
+    
+    await admin_send_file_to_user(message, state)
+
 async def admin_send_file_to_user(message: types.Message, state: FSMContext):
     """Админ отправляет файл пользователю"""
     data = await state.get_data()
-    user_id = data['target_user_id']
+    user_id = data.get('target_user_id')
+    
+    if not user_id:
+        await message.answer("❌ Не указан ID пользователя. Начните заново.")
+        await state.clear()
+        return
     
     try:
         # Отправляем файл пользователю
@@ -700,7 +896,7 @@ https://tritika.ru/
     await state.clear()
 
 @dp.message(Command("send_file"))
-async def quick_send_file_command(message: types.Message):
+async def quick_send_file_command(message: types.Message, state: FSMContext):
     """Быстрая команда для отправки файла"""
     if message.from_user.id != ADMIN_ID:
         return
@@ -712,22 +908,32 @@ async def quick_send_file_command(message: types.Message):
     
     try:
         user_id = int(args[1])
-        await message.answer(
-            f"📁 <b>Отправка файла пользователю ID: {user_id}</b>\n\n"
-            f"Теперь отправьте файл (PDF, Word, Excel или архив):"
-        )
         
-        # Сохраняем ID в состоянии
-        from aiogram.fsm.context import FSMContext
-        state = FSMContext(storage=storage, key=message.chat.id)
-        await state.set_state(AdminAction.waiting_for_file)
-        await state.update_data(target_user_id=user_id)
-        
+        # Проверяем, есть ли такой пользователь в базе
+        questionnaire = get_questionnaire_by_user_id(user_id)
+        if questionnaire:
+            await state.update_data(target_user_id=user_id)
+            await message.answer(
+                f"✅ Найден пользователь:\n"
+                f"👤 ФИО: {questionnaire[3]}\n"
+                f"🏢 Компания: {questionnaire[4]}\n\n"
+                f"Теперь отправьте файл (PDF, Word, Excel или архив):",
+                reply_markup=get_cancel_keyboard()
+            )
+            await state.set_state(AdminAction.waiting_for_file)
+        else:
+            await message.answer(
+                f"❌ Пользователь с ID {user_id} не найден в базе. "
+                f"Введите ID заново или отмените.",
+                reply_markup=get_cancel_keyboard()
+            )
+            await state.set_state(AdminAction.waiting_for_user_id)
     except ValueError:
-        await message.answer("❌ Введите корректный ID (число)")
+        await message.answer("❌ Некорректный ID. Введите число.")
 
 # =========== ОБЩЕНИЕ МЕЖДУ КЛИЕНТОМ И АДМИНОМ ===========
 @dp.message(F.text == "📨 Написать менеджеру")
+@catch_state_errors
 async def start_message_to_admin(message: types.Message, state: FSMContext):
     """Пользователь начинает диалог с админом"""
     await message.answer(
@@ -754,8 +960,13 @@ async def admin_start_message_to_user(message: types.Message, state: FSMContext)
     await state.update_data(is_admin_to_user=True)
 
 @dp.message(AdminAction.waiting_for_message)
+@catch_state_errors
 async def send_message_between_users(message: types.Message, state: FSMContext):
     """Отправка сообщения между пользователем и админом"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
     data = await state.get_data()
     message_text = message.text
     
@@ -770,7 +981,7 @@ async def send_message_between_users(message: types.Message, state: FSMContext):
                 f"📨 <b>Сообщение от пользователя ID: {message.from_user.id}</b>\n\n"
                 f"👤 Пользователь: @{message.from_user.username or 'не указан'}\n"
                 f"💬 Сообщение: {message_text}\n\n"
-                f"<i>Для ответа используйте команду: /reply_{message.from_user.id}</i>"
+                f"<i>Для ответа используйте команду: /reply {message.from_user.id} текст</i>"
             )
             await message.answer(
                 "✅ Ваше сообщение отправлено менеджеру. Ответ придет в этот чат.",
@@ -886,6 +1097,10 @@ async def admin_statistics(message: types.Message):
         cursor.execute("SELECT COUNT(*) FROM messages")
         messages = cursor.fetchone()[0]
         
+        # Последняя активность
+        cursor.execute("SELECT MAX(created_at) FROM questionnaires")
+        last_activity = cursor.fetchone()[0] or "Нет данных"
+        
         conn.close()
         
         stats_text = f"""
@@ -900,6 +1115,9 @@ async def admin_statistics(message: types.Message):
 • Отправлено файлов: {sent_files}
 • Сообщений в чатах: {messages}
 
+<b>Последняя активность:</b>
+{last_activity}
+
 <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
         """
         
@@ -910,10 +1128,14 @@ async def admin_statistics(message: types.Message):
         await message.answer("❌ Ошибка получения статистики", reply_markup=get_admin_keyboard())
 
 @dp.message(F.text == "❌ Отменить")
+@catch_state_errors
 async def cancel_action(message: types.Message, state: FSMContext):
     """Отмена текущего действия"""
     current_state = await state.get_state()
     if current_state is None:
+        # Если состояния нет, показываем главное меню
+        keyboard = get_admin_keyboard() if message.from_user.id == ADMIN_ID else get_main_keyboard()
+        await message.answer("Главное меню:", reply_markup=keyboard)
         return
     
     await message.answer(
@@ -943,14 +1165,44 @@ async def handle_all_messages(message: types.Message):
             reply_markup=get_main_keyboard()
         )
 
+# =========== HTTP SERVER FOR HEALTHCHECK ===========
+async def healthcheck(request):
+    """Обработчик healthcheck для Replit"""
+    return web.Response(text="OK")
+
+async def start_http_server():
+    """Запуск HTTP сервера для healthcheck"""
+    app = web.Application()
+    app.router.add_get('/', healthcheck)
+    app.router.add_get('/health', healthcheck)
+    
+    port = int(os.environ.get('PORT', 8080))
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    logger.info(f"✅ HTTP сервер запущен на порту {port}")
+    return runner
+
 # =========== ЗАПУСК БОТА ===========
 async def main():
     """Запуск бота"""
     logger.info("🚀 Запуск бота ТРИТИКА на Replit...")
     
     try:
+        # Запускаем HTTP сервер для healthcheck
+        http_runner = await start_http_server()
+        
+        # Проверяем соединение с ботом
+        bot_info = await bot.get_me()
+        logger.info(f"✅ Бот запущен: @{bot_info.username}")
+        
         # Запускаем бота
         await dp.start_polling(bot)
+        
+        # Останавливаем HTTP сервер при завершении
+        await http_runner.cleanup()
+        
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
         raise
