@@ -18,6 +18,8 @@ from aiogram.types import (
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiohttp import web
+import threading
 
 # Настройка логирования
 logging.basicConfig(
@@ -1162,39 +1164,43 @@ async def handle_all_messages(message: types.Message):
             reply_markup=get_main_keyboard()
         )
 
-# =========== HTTP SERVER FOR HEALTHCHECK ===========
-import threading
-from flask import Flask
+# =========== HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
+async def health_check(request):
+    """Обработчик healthcheck для Railway"""
+    return web.Response(text='OK')
 
-# Создаем Flask приложение для healthcheck
-flask_app = Flask(__name__)
-
-@flask_app.route('/')
-def healthcheck():
-    return 'OK'
-
-@flask_app.route('/health')
-def health():
-    return 'OK', 200
-
-def run_flask():
-    """Запуск Flask сервера в отдельном потоке"""
+async def start_http_server():
+    """Запуск HTTP сервера для healthcheck"""
+    # Получаем порт из переменной окружения Railway
     port = int(os.environ.get('PORT', 8080))
-    flask_app.run(host='0.0.0.0', port=port, debug=False)
+    
+    # Создаем приложение aiohttp
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    # Настраиваем runner
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    # Запускаем сайт
+    site = web.TCPSite(runner, '0.0.0.0', port)
+    await site.start()
+    
+    logger.info(f"✅ HTTP сервер запущен на порту {port}")
+    return runner
 
-# =========== ЗАПУСК БОТА ===========
+# =========== ЗАПУСК БОТА С HTTP СЕРВЕРОМ ===========
 async def main():
-    """Запуск бота"""
-    logger.info("🚀 Запуск бота ТРИТИКА на Replit...")
+    """Запуск бота с HTTP сервером для Railway"""
+    logger.info("🚀 Запуск бота ТРИТИКА на Railway...")
     
     try:
-        # Запускаем HTTP сервер для healthcheck в отдельном потоке
-        flask_thread = threading.Thread(target=run_flask, daemon=True)
-        flask_thread.start()
-        logger.info(f"✅ HTTP сервер запущен на порту {os.environ.get('PORT', 8080)}")
+        # Запускаем HTTP сервер для healthcheck
+        http_runner = await start_http_server()
         
         # Даем время серверу запуститься
-        await asyncio.sleep(2)
+        await asyncio.sleep(1)
         
         # Проверяем соединение с ботом
         bot_info = await bot.get_me()
@@ -1206,7 +1212,13 @@ async def main():
     except Exception as e:
         logger.error(f"❌ Критическая ошибка: {e}")
         raise
+    finally:
+        # Останавливаем HTTP сервер при завершении
+        if 'http_runner' in locals():
+            await http_runner.cleanup()
+            logger.info("✅ HTTP сервер остановлен")
 
+# =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
 if __name__ == "__main__":
-    # Для Replit: запускаем asyncio в отдельном потоке
+    # Для Railway запускаем asyncio
     asyncio.run(main())
