@@ -236,6 +236,7 @@ class AdminAction(StatesGroup):
 
 class UserFeedback(StatesGroup):
     waiting_for_feedback = State()
+    waiting_for_feedback_text = State()
 
 # =========== КЛАВИАТУРЫ ===========
 def get_main_keyboard():
@@ -265,7 +266,7 @@ def get_admin_keyboard():
     )
     return keyboard
 
-def get_cancel_keyboard(is_admin=False):
+def get_cancel_keyboard():
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отменить")]],
         resize_keyboard=True
@@ -615,14 +616,13 @@ async def cmd_start(message: types.Message):
         await message.answer(
             "👑 <b>Панель администратора</b>\n\n"
             "Добро пожаловать в админ-панель!\n\n"
-            "<b>Новые функции:</b>\n"
-            "• 📤 Сделать рассылку - массовая рассылка клиентам\n"
-            "• 📊 Отчет по отзывам - статистика по обратной связи\n\n"
             "<b>Доступные функции:</b>\n"
             "• 📊 Все заявки - просмотр всех анкет\n"
             "• 🆕 Новые заявки - только новые заявки\n"
             "• 📁 Отправить файл - отправить выгрузку клиенту\n"
             "• 💬 Написать клиенту - отправить сообщение\n"
+            "• 📤 Сделать рассылку - массовая рассылка клиентам\n"
+            "• 📊 Отчет по отзывам - статистика по обратной связи\n"
             "• 📋 Статистика - общая статистика работы\n\n"
             "Используйте кнопки ниже:",
             reply_markup=get_admin_keyboard()
@@ -636,7 +636,6 @@ async def cmd_start(message: types.Message):
             "• Персональная выгрузка в течение часа\n"
             "• Консультации по участию\n"
             "• Сопровождение сделок\n\n"
-            "<b>Новая функция:</b> 💬 Оставить отзыв - поделитесь своим мнением о нашей работе!\n\n"
             "Нажмите <b>'📝 Заполнить анкету'</b> чтобы начать!",
             reply_markup=get_main_keyboard()
         )
@@ -650,509 +649,410 @@ async def main_menu(message: types.Message):
         await message.answer("Главное меню:", reply_markup=get_main_keyboard())
 
 # =========== ЗАПОЛНЕНИЕ АНКЕТЫ (ПОЛЬЗОВАТЕЛЬ) ===========
-@dp.message(AntiFlood(2), F.text == "📝 Заполнить анкету")
-@catch_state_errors
+@dp.message(F.text == "📝 Заполнить анкету")
 async def start_questionnaire(message: types.Message, state: FSMContext):
     """Начало заполнения анкеты"""
     if message.from_user.id == ADMIN_ID:
         await message.answer("Вы администратор, вам не нужно заполнять анкету.", reply_markup=get_admin_keyboard())
         return
     
-    try:
-        # Проверяем, не заполняется ли уже анкета
-        current_state = await state.get_state()
-        if current_state:
-            await message.answer("Вы уже заполняете анкету. Продолжайте или нажмите ❌ Отменить.")
-            return
-        
-        await message.answer(
-            "📋 <b>Начинаем заполнение анкеты!</b>\n\n"
-            "Заполнение займет 2-3 минуты.\n\n"
-            "<b>Введите ваше ФИО полностью:</b>\n"
-            "<i>Пример: Иванов Иван Иванович</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_name)
-    except Exception as e:
-        logger.error(f"Ошибка в start_questionnaire: {e}", exc_info=True)
-        await message.answer(
-            "❌ Произошла техническая ошибка. Пожалуйста, попробуйте позже.",
-            reply_markup=get_main_keyboard()
-        )
-        await state.clear()
+    # Проверяем, не заполняется ли уже анкета
+    current_state = await state.get_state()
+    if current_state:
+        await message.answer("Вы уже заполняете анкету. Продолжайте или нажмите ❌ Отменить.", reply_markup=get_cancel_keyboard())
+        return
+    
+    await message.answer(
+        "📋 <b>Начинаем заполнение анкеты!</b>\n\n"
+        "Заполнение займет 2-3 минуты.\n\n"
+        "<b>Введите ваше ФИО полностью:</b>\n"
+        "<i>Пример: Иванов Иван Иванович</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_name)
+    await state.update_data(user_id=message.from_user.id, username=message.from_user.username or "Не указан")
 
 @dp.message(Questionnaire.waiting_for_name)
-@catch_state_errors
 async def process_name(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        if len(message.text.strip()) < 2:
-            await message.answer("❌ ФИО должно содержать минимум 2 символа. Введите снова:")
-            return
-        
-        await state.update_data(full_name=message.text.strip())
-        await message.answer(
-            "✅ <b>ФИО сохранено</b>\n\n"
-            "<b>Введите полное название вашей компании:</b>\n"
-            "<i>Пример: ООО 'Ромашка'</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_company)
-    except Exception as e:
-        logger.error(f"Ошибка в process_name: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении ФИО. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка ФИО"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    name = message.text.strip()
+    if len(name) < 2:
+        await message.answer("❌ ФИО должно содержать минимум 2 символа. Введите снова:")
+        return
+    
+    await state.update_data(full_name=name)
+    await message.answer(
+        "✅ <b>ФИО сохранено</b>\n\n"
+        "<b>Введите полное название вашей компании:</b>\n"
+        "<i>Пример: ООО 'Ромашка'</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_company)
 
 @dp.message(Questionnaire.waiting_for_company)
-@catch_state_errors
 async def process_company(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        if len(message.text.strip()) < 2:
-            await message.answer("❌ Название компании должно содержать минимум 2 символа. Введите снова:")
-            return
-        
-        await state.update_data(company_name=message.text.strip())
-        await message.answer(
-            "✅ <b>Название компании сохранено</b>\n\n"
-            "<b>Введите ИНН компании:</b>\n"
-            "<i>10 или 12 цифр без пробелов</i>\n"
-            "<i>Пример: 1234567890</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_inn)
-    except Exception as e:
-        logger.error(f"Ошибка в process_company: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении названия компании. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка названия компании"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    company = message.text.strip()
+    if len(company) < 2:
+        await message.answer("❌ Название компании должно содержать минимум 2 символа. Введите снова:")
+        return
+    
+    await state.update_data(company_name=company)
+    await message.answer(
+        "✅ <b>Название компании сохранено</b>\n\n"
+        "<b>Введите ИНН компании:</b>\n"
+        "<i>10 или 12 цифр без пробелов</i>\n"
+        "<i>Пример: 1234567890</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_inn)
 
 @dp.message(Questionnaire.waiting_for_inn)
-@catch_state_errors
 async def process_inn(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        inn = message.text.strip().replace(' ', '')
-        if not validate_inn(inn):
-            await message.answer("❌ Неверный ИНН. ИНН должен содержать 10 или 12 цифр. Введите снова:")
-            return
-        
-        await state.update_data(inn=inn)
-        await message.answer(
-            "✅ <b>ИНН сохранен</b>\n\n"
-            "<b>Введите контактное лицо для связи:</b>\n"
-            "<i>Кто будет общаться по тендерам (ФИО или должность)</i>\n"
-            "<i>Пример: Петров Петр Петрович или Менеджер по закупкам</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_contact)
-    except Exception as e:
-        logger.error(f"Ошибка в process_inn: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении ИНН. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка ИНН"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    inn = message.text.strip().replace(' ', '')
+    if not validate_inn(inn):
+        await message.answer("❌ Неверный ИНН. ИНН должен содержать 10 или 12 цифр. Введите снова:")
+        return
+    
+    await state.update_data(inn=inn)
+    await message.answer(
+        "✅ <b>ИНН сохранен</b>\n\n"
+        "<b>Введите контактное лицо для связи:</b>\n"
+        "<i>Кто будет общаться по тендерам (ФИО или должность)</i>\n"
+        "<i>Пример: Петров Петр Петрович или Менеджер по закупкам</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_contact)
 
 @dp.message(Questionnaire.waiting_for_contact)
-@catch_state_errors
 async def process_contact(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        if len(message.text.strip()) < 2:
-            await message.answer("❌ Контактное лицо должно содержать минимум 2 символа. Введите снова:")
-            return
-        
-        await state.update_data(contact_person=message.text.strip())
-        await message.answer(
-            "✅ <b>Контактное лицо сохранено</b>\n\n"
-            "<b>Введите телефон для связи:</b>\n"
-            "<i>Пример: +7 999 123-45-67 или 8-999-123-45-67</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_phone)
-    except Exception as e:
-        logger.error(f"Ошибка в process_contact: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении контактного лица. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка контактного лица"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    contact = message.text.strip()
+    if len(contact) < 2:
+        await message.answer("❌ Контактное лицо должно содержать минимум 2 символа. Введите снова:")
+        return
+    
+    await state.update_data(contact_person=contact)
+    await message.answer(
+        "✅ <b>Контактное лицо сохранено</b>\n\n"
+        "<b>Введите телефон для связи:</b>\n"
+        "<i>Пример: +7 999 123-45-67 или 8-999-123-45-67</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_phone)
 
 @dp.message(Questionnaire.waiting_for_phone)
-@catch_state_errors
 async def process_phone(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        phone = message.text.strip()
-        # Простая валидация телефона
-        digits = sum(c.isdigit() for c in phone)
-        if digits < 10:
-            await message.answer("❌ Телефон должен содержать минимум 10 цифр. Введите снова:")
-            return
-        
-        await state.update_data(phone=phone)
-        await message.answer(
-            "✅ <b>Телефон сохранен</b>\n\n"
-            "<b>Введите email:</b>\n"
-            "<i>На этот адрес придет выгрузка тендеров</i>\n"
-            "<i>Пример: example@company.ru</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_email)
-    except Exception as e:
-        logger.error(f"Ошибка в process_phone: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении телефона. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка телефона"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    phone = message.text.strip()
+    # Простая валидация телефона
+    digits = sum(c.isdigit() for c in phone)
+    if digits < 10:
+        await message.answer("❌ Телефон должен содержать минимум 10 цифр. Введите снова:")
+        return
+    
+    await state.update_data(phone=phone)
+    await message.answer(
+        "✅ <b>Телефон сохранен</b>\n\n"
+        "<b>Введите email:</b>\n"
+        "<i>На этот адрес придет выгрузка тендеров</i>\n"
+        "<i>Пример: example@company.ru</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_email)
 
 @dp.message(Questionnaire.waiting_for_email)
-@catch_state_errors
 async def process_email(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        email = message.text.strip().lower()
-        if '@' not in email or '.' not in email or len(email) < 5:
-            await message.answer("❌ Введите корректный email адрес. Пример: example@company.ru")
-            return
-        
-        await state.update_data(email=email)
-        await message.answer(
-            "✅ <b>Email сохранен</b>\n\n"
-            "<b>Введите сферу деятельности компании:</b>\n"
-            "<i>Пример: Строительство, ОКВЭД 41.20</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_activity)
-    except Exception as e:
-        logger.error(f"Ошибка в process_email: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении email. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка email"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    email = message.text.strip().lower()
+    if '@' not in email or '.' not in email or len(email) < 5:
+        await message.answer("❌ Введите корректный email адрес. Пример: example@company.ru")
+        return
+    
+    await state.update_data(email=email)
+    await message.answer(
+        "✅ <b>Email сохранен</b>\n\n"
+        "<b>Введите сферу деятельности компании:</b>\n"
+        "<i>Пример: Строительство, ОКВЭД 41.20</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_activity)
 
 @dp.message(Questionnaire.waiting_for_activity)
-@catch_state_errors
 async def process_activity(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        if len(message.text.strip()) < 2:
-            await message.answer("❌ Сфера деятельности должна содержать минимум 2 символа. Введите снова:")
-            return
-        
-        await state.update_data(activity_sphere=message.text.strip())
-        await message.answer(
-            "✅ <b>Сфера деятельности сохранена</b>\n\n"
-            "<b>Введите ключевые слова для поиска тендеров:</b>\n"
-            "<i>Чем занимается ваша компания (через запятую)</i>\n"
-            "<i>Пример: строительство, ремонт, отделка, монтаж</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_industry)
-    except Exception as e:
-        logger.error(f"Ошибка в process_activity: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении сферы деятельности. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка сферы деятельности"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    activity = message.text.strip()
+    if len(activity) < 2:
+        await message.answer("❌ Сфера деятельности должна содержать минимум 2 символа. Введите снова:")
+        return
+    
+    await state.update_data(activity_sphere=activity)
+    await message.answer(
+        "✅ <b>Сфера деятельности сохранена</b>\n\n"
+        "<b>Введите ключевые слова для поиска тендеров:</b>\n"
+        "<i>Чем занимается ваша компания (через запятую)</i>\n"
+        "<i>Пример: строительство, ремонт, отделка, монтаж</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_industry)
 
 @dp.message(Questionnaire.waiting_for_industry)
-@catch_state_errors
 async def process_industry(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        if len(message.text.strip()) < 2:
-            await message.answer("❌ Ключевые слова должны содержать минимум 2 символа. Введите снова:")
-            return
-        
-        await state.update_data(industry=message.text.strip())
-        await message.answer(
-            "✅ <b>Ключевые слова сохранены</b>\n\n"
-            "<b>Введите желаемый бюджет контрактов:</b>\n"
-            "<i>Пример: от 100 000 до 500 000 рублей</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_amount)
-    except Exception as e:
-        logger.error(f"Ошибка в process_industry: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении ключевых слов. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка ключевых слов"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    industry = message.text.strip()
+    if len(industry) < 2:
+        await message.answer("❌ Ключевые слова должны содержать минимум 2 символа. Введите снова:")
+        return
+    
+    await state.update_data(industry=industry)
+    await message.answer(
+        "✅ <b>Ключевые слова сохранены</b>\n\n"
+        "<b>Введите желаемый бюджет контрактов:</b>\n"
+        "<i>Пример: от 100 000 до 500 000 рублей</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_amount)
 
 @dp.message(Questionnaire.waiting_for_amount)
-@catch_state_errors
 async def process_amount(message: types.Message, state: FSMContext):
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        if len(message.text.strip()) < 2:
-            await message.answer("❌ Бюджет должен содержать минимум 2 символа. Введите снова:")
-            return
-        
-        await state.update_data(contract_amount=message.text.strip())
-        await message.answer(
-            "✅ <b>Бюджет сохранен</b>\n\n"
-            "<b>Введите регионы работы через запятую:</b>\n"
-            "<i>В каких регионах готовы работать</i>\n"
-            "<i>Пример: Москва, Московская область, Владимир</i>",
-            reply_markup=get_cancel_keyboard()
-        )
-        await state.set_state(Questionnaire.waiting_for_regions)
-    except Exception as e:
-        logger.error(f"Ошибка в process_amount: {e}", exc_info=True)
-        await message.answer(
-            "❌ Ошибка при сохранении бюджета. Введите снова:",
-            reply_markup=get_cancel_keyboard()
-        )
+    """Обработка бюджета"""
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    amount = message.text.strip()
+    if len(amount) < 2:
+        await message.answer("❌ Бюджет должен содержать минимум 2 символа. Введите снова:")
+        return
+    
+    await state.update_data(contract_amount=amount)
+    await message.answer(
+        "✅ <b>Бюджет сохранен</b>\n\n"
+        "<b>Введите регионы работы через запятую:</b>\n"
+        "<i>В каких регионах готовы работать</i>\n"
+        "<i>Пример: Москва, Московская область, Владимир</i>",
+        reply_markup=get_cancel_keyboard()
+    )
+    await state.set_state(Questionnaire.waiting_for_regions)
 
 @dp.message(Questionnaire.waiting_for_regions)
-@catch_state_errors
 async def process_regions(message: types.Message, state: FSMContext):
     """Завершение заполнения анкеты"""
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    regions = message.text.strip()
+    if len(regions) < 2:
+        await message.answer("❌ Регионы должны содержать минимум 2 символа. Введите снова:")
+        return
+    
+    # Получаем все данные
+    user_data = await state.get_data()
+    user_data['regions'] = regions
+    
+    # Сохраняем в базу данных
+    questionnaire_id = save_questionnaire_to_db(user_data)
+    
+    if questionnaire_id:
+        # Отправляем подтверждение пользователю
+        await message.answer(
+            "✅ <b>Запрос получен!</b>\n\n"
+            "Благодарим вас за обращение в наш сервис. Мы уже начали поиск тендеров по вашим параметрам.\n\n"
+            "Обработка запроса и формирование персональной подборки займет не более 1-го часа.\n"
+            "Как только выгрузка будет готова, мы пришлем ее в этот чат.\n\n"
+            "<b>Следите за обновлениями!</b>\n"
+            "—\n"
+            "Всегда на связи, команда ТРИТИКА.\n"
+            "Телефон: +7 (904) 653-69-87\n"
+            "Сайт: https://tritika.ru/\n"
+            "E-mail: info@tritika.ru",
+            reply_markup=get_main_keyboard()
+        )
         
-        if len(message.text.strip()) < 2:
-            await message.answer("❌ Регионы должны содержать минимум 2 символа. Введите снова:")
-            return
+        # Отправляем уведомление админу
+        admin_message = f"""
+🆕 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
+
+<b>👤 Данные клиента:</b>
+• ID пользователя: {user_data['user_id']}
+• Username: @{user_data['username']}
+• ФИО: {user_data['full_name']}
+• Компания: {user_data['company_name']}
+• ИНН: {user_data['inn']}
+• Контакт: {user_data['contact_person']}
+• Телефон: {user_data['phone']}
+• Email: {user_data['email']}
+
+<b>📊 Параметры поиска:</b>
+• Сфера: {user_data['activity_sphere']}
+• Ключевые слова: {user_data['industry']}
+• Бюджет: {user_data['contract_amount']}
+• Регионы: {user_data['regions']}
+
+<b>⏰ Время подачи:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+<i>Для отправки файла используйте кнопку "📁 Отправить файл клиенту" или команду /send_file_{user_data['user_id']}</i>
+"""
         
-        user_data = await state.get_data()
-        
-        # Добавляем информацию о пользователе
-        user_data['user_id'] = message.from_user.id
-        user_data['username'] = message.from_user.username or "Не указан"
-        user_data['regions'] = message.text.strip()
-        
-        # Сохраняем в базу данных
-        questionnaire_id = save_questionnaire_to_db(user_data)
-        
-        if questionnaire_id:
-            # Отправляем подтверждение пользователю
-            await message.answer(
-                "✅ <b>Запрос получен!</b>\n\n"
-                "Благодарим вас за обращение в наш сервис. Мы уже начали поиск тендеров по вашим параметрам.\n\n"
-                "Обработка запроса и формирование персональной подборки займет не более 1-го часа.\n"
-                "Как только выгрузка будет готова, мы пришлем ее в этот чат.\n\n"
-                "<b>Следите за обновлениями!</b>\n"
-                "—\n"
-                "Всегда на связи, команда ТРИТИКА.\n"
-                "Телефон: +7 (904) 653-69-87\n"
-                "Сайт: https://tritika.ru/\n"
-                "E-mail: info@tritika.ru",
-                reply_markup=get_main_keyboard()
-            )
-            
-            # Отправляем уведомление админу
-            admin_message = f"""
-            🆕 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
-            
-            <b>👤 Данные клиента:</b>
-            • ID пользователя: {user_data['user_id']}
-            • Username: @{user_data['username']}
-            • ФИО: {user_data['full_name']}
-            • Компания: {user_data['company_name']}
-            • ИНН: {user_data['inn']}
-            • Контакт: {user_data['contact_person']}
-            • Телефон: {user_data['phone']}
-            • Email: {user_data['email']}
-            
-            <b>📊 Параметры поиска:</b>
-            • Сфера: {user_data['activity_sphere']}
-            • Ключевые слова: {user_data['industry']}
-            • Бюджет: {user_data['contract_amount']}
-            • Регионы: {user_data['regions']}
-            
-            <b>⏰ Время подачи:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
-            
-            <i>Для отправки файла используйте кнопку "📁 Отправить файл клиенту" или команду /send_file_{user_data['user_id']}</i>
-            """
-            
-            try:
-                await bot.send_message(ADMIN_ID, admin_message)
-                logger.info(f"✅ Анкета #{questionnaire_id} отправлена админу")
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки админу: {e}")
-        else:
-            await message.answer(
-                "❌ Произошла ошибка при сохранении анкеты. Пожалуйста, попробуйте позже.",
-                reply_markup=get_main_keyboard()
-            )
-        
-        await state.clear()
-        
-    except Exception as e:
-        logger.error(f"Ошибка в process_regions: {e}", exc_info=True)
+        try:
+            await bot.send_message(ADMIN_ID, admin_message)
+            logger.info(f"✅ Анкета #{questionnaire_id} отправлена админу")
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки админу: {e}")
+    else:
         await message.answer(
             "❌ Произошла ошибка при сохранении анкеты. Пожалуйста, попробуйте позже.",
             reply_markup=get_main_keyboard()
         )
-        await state.clear()
+    
+    await state.clear()
 
 # =========== ОБРАТНАЯ СВЯЗЬ ОТ ПОЛЬЗОВАТЕЛЯ ===========
 @dp.message(F.text == "💬 Оставить отзыв")
-@catch_state_errors
 async def start_feedback(message: types.Message, state: FSMContext):
     """Начало оставления отзыва"""
     if message.from_user.id == ADMIN_ID:
         await message.answer("Вы администратор, вам не нужно оставлять отзыв.", reply_markup=get_admin_keyboard())
         return
     
-    try:
-        # Проверяем, заполнял ли пользователь анкету
-        questionnaire = get_questionnaire_by_user_id(message.from_user.id)
-        
-        if not questionnaire:
-            await message.answer(
-                "📝 <b>Сначала заполните анкету!</b>\n\n"
-                "Чтобы оставить отзыв о нашей работе, сначала необходимо заполнить анкету для поиска тендеров.",
-                reply_markup=get_main_keyboard()
-            )
-            return
-        
-        # Проверяем, оставлял ли уже отзыв
-        if questionnaire[16]:  # feedback_given
-            await message.answer(
-                "✅ <b>Вы уже оставляли отзыв!</b>\n\n"
-                "Спасибо за вашу обратную связь! Мы ценим ваше мнение.",
-                reply_markup=get_main_keyboard()
-            )
-            return
-        
+    # Проверяем, заполнял ли пользователь анкету
+    questionnaire = get_questionnaire_by_user_id(message.from_user.id)
+    
+    if not questionnaire:
         await message.answer(
-            "💬 <b>Оставить отзыв</b>\n\n"
-            "Пожалуйста, оцените нашу работу:\n"
-            "• Устроило ли вас качество выгрузки тендеров?\n"
-            "• Была ли информация полезной?\n"
-            "• Какие улучшения вы бы предложили?\n\n"
-            "Выберите вариант ниже:",
-            reply_markup=get_yes_no_keyboard()
-        )
-        await state.set_state(UserFeedback.waiting_for_feedback)
-    except Exception as e:
-        logger.error(f"Ошибка в start_feedback: {e}", exc_info=True)
-        await message.answer(
-            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            "📝 <b>Сначала заполните анкету!</b>\n\n"
+            "Чтобы оставить отзыв о нашей работе, сначала необходимо заполнить анкету для поиска тендеров.",
             reply_markup=get_main_keyboard()
         )
+        return
+    
+    # Проверяем, оставлял ли уже отзыв
+    if questionnaire[16]:  # feedback_given
+        await message.answer(
+            "✅ <b>Вы уже оставляли отзыв!</b>\n\n"
+            "Спасибо за вашу обратную связь! Мы ценим ваше мнение.",
+            reply_markup=get_main_keyboard()
+        )
+        return
+    
+    await message.answer(
+        "💬 <b>Оставить отзыв</b>\n\n"
+        "Пожалуйста, оцените нашу работу:\n"
+        "• Устроило ли вас качество выгрузки тендеров?\n"
+        "• Была ли информация полезной?\n"
+        "• Какие улучшения вы бы предложили?\n\n"
+        "Выберите вариант ниже:",
+        reply_markup=get_yes_no_keyboard()
+    )
+    await state.set_state(UserFeedback.waiting_for_feedback)
 
 @dp.message(UserFeedback.waiting_for_feedback)
-@catch_state_errors
 async def process_feedback_choice(message: types.Message, state: FSMContext):
     """Обработка выбора оценки"""
-    try:
-        if message.text == "❌ Отменить":
-            await cancel_action(message, state)
-            return
-        
-        if message.text not in ["✅ Да, все отлично", "❌ Есть замечания"]:
-            await message.answer("Пожалуйста, выберите один из предложенных вариантов:")
-            return
-        
-        is_positive = message.text == "✅ Да, все отлично"
-        await state.update_data(feedback_choice=is_positive)
-        
-        if is_positive:
-            await message.answer(
-                "🎉 <b>Отлично! Рады, что вы довольны!</b>\n\n"
-                "Пожалуйста, напишите пару слов о том, что вам понравилось:",
-                reply_markup=get_cancel_keyboard()
-            )
-        else:
-            await message.answer(
-                "📝 <b>Спасибо за честность!</b>\n\n"
-                "Пожалуйста, опишите, что можно улучшить в нашей работе:",
-                reply_markup=get_cancel_keyboard()
-            )
-        
-        await state.set_state(UserFeedback.waiting_for_feedback)
-    except Exception as e:
-        logger.error(f"Ошибка в process_feedback_choice: {e}", exc_info=True)
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    if message.text not in ["✅ Да, все отлично", "❌ Есть замечания"]:
+        await message.answer("Пожалуйста, выберите один из предложенных вариантов:", reply_markup=get_yes_no_keyboard())
+        return
+    
+    is_positive = message.text == "✅ Да, все отлично"
+    await state.update_data(feedback_choice=is_positive)
+    
+    if is_positive:
         await message.answer(
-            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
-            reply_markup=get_main_keyboard()
+            "🎉 <b>Отлично! Рады, что вы довольны!</b>\n\n"
+            "Пожалуйста, напишите пару слов о том, что вам понравилось:",
+            reply_markup=get_cancel_keyboard()
         )
+    else:
+        await message.answer(
+            "📝 <b>Спасибо за честность!</b>\n\n"
+            "Пожалуйста, опишите, что можно улучшить в нашей работе:",
+            reply_markup=get_cancel_keyboard()
+        )
+    
+    await state.set_state(UserFeedback.waiting_for_feedback_text)
 
-@dp.message(UserFeedback.waiting_for_feedback, F.text != "❌ Отменить")
-@catch_state_errors
+@dp.message(UserFeedback.waiting_for_feedback_text)
 async def process_feedback_text(message: types.Message, state: FSMContext):
     """Обработка текста отзыва"""
-    try:
-        if len(message.text.strip()) < 5:
-            await message.answer("❌ Отзыв должен содержать минимум 5 символов. Пожалуйста, напишите подробнее:")
-            return
-        
-        data = await state.get_data()
-        is_positive = data.get('feedback_choice', True)
-        
-        # Сохраняем отзыв
-        feedback_text = f"{'✅ Положительный: ' if is_positive else '❌ Критика: '}{message.text}"
-        success = save_feedback(message.from_user.id, feedback_text, is_positive)
-        
-        if success:
-            await message.answer(
-                "🙏 <b>Спасибо за ваш отзыв!</b>\n\n"
-                "Ваше мнение очень важно для нас. Мы обязательно учтем ваши пожелания для улучшения нашего сервиса.\n\n"
-                "Если у вас есть дополнительные вопросы или предложения, не стесняйтесь написать нам!",
-                reply_markup=get_main_keyboard()
-            )
-            
-            # Уведомляем админа
-            try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"💬 <b>НОВЫЙ ОТЗЫВ ОТ ПОЛЬЗОВАТЕЛЯ</b>\n\n"
-                    f"👤 Пользователь: @{message.from_user.username or 'не указан'} (ID: {message.from_user.id})\n"
-                    f"📝 Отзыв: {feedback_text}\n\n"
-                    f"⏰ Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-                )
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки уведомления админу: {e}")
-        else:
-            await message.answer(
-                "❌ Произошла ошибка при сохранении отзыва. Пожалуйста, попробуйте позже.",
-                reply_markup=get_main_keyboard()
-            )
-        
-        await state.clear()
-        
-    except Exception as e:
-        logger.error(f"Ошибка в process_feedback_text: {e}", exc_info=True)
+    if message.text == "❌ Отменить":
+        await cancel_action(message, state)
+        return
+    
+    if len(message.text.strip()) < 5:
+        await message.answer("❌ Отзыв должен содержать минимум 5 символов. Пожалуйста, напишите подробнее:")
+        return
+    
+    data = await state.get_data()
+    is_positive = data.get('feedback_choice', True)
+    
+    # Сохраняем отзыв
+    feedback_text = f"{'✅ Положительный: ' if is_positive else '❌ Критика: '}{message.text}"
+    success = save_feedback(message.from_user.id, feedback_text, is_positive)
+    
+    if success:
         await message.answer(
-            "❌ Произошла ошибка. Пожалуйста, попробуйте позже.",
+            "🙏 <b>Спасибо за ваш отзыв!</b>\n\n"
+            "Ваше мнение очень важно для нас. Мы обязательно учтем ваши пожелания для улучшения нашего сервиса.\n\n"
+            "Если у вас есть дополнительные вопросы или предложения, не стесняйтесь написать нам!",
             reply_markup=get_main_keyboard()
         )
-        await state.clear()
+        
+        # Уведомляем админа
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"💬 <b>НОВЫЙ ОТЗЫВ ОТ ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+                f"👤 Пользователь: @{message.from_user.username or 'не указан'} (ID: {message.from_user.id})\n"
+                f"📝 Отзыв: {feedback_text}\n\n"
+                f"⏰ Время: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки уведомления админу: {e}")
+    else:
+        await message.answer(
+            "❌ Произошла ошибка при сохранении отзыва. Пожалуйста, попробуйте позже.",
+            reply_markup=get_main_keyboard()
+        )
+    
+    await state.clear()
 
 # =========== АДМИН: ПРОСМОТР ЗАЯВОК ===========
 @dp.message(F.text == "📊 Все заявки")
@@ -1173,12 +1073,12 @@ async def admin_all_requests(message: types.Message):
         status_icon = "🆕" if q[13] == "new" else "✅" if q[13] == "processed" else "📁"
         feedback_icon = "💬" if q[16] else "💭"
         response += f"""
-        <b>#{q[0]}</b> - {q[3]} ({q[4]})
-        👤 ID: {q[1]} | @{q[2]}
-        📅 {q[14][:10]}
-        {status_icon} Статус: {q[13]} | {feedback_icon} Отзыв: {'Да' if q[16] else 'Нет'}
-        ──────────────────────
-        """
+<b>#{q[0]}</b> - {q[3]} ({q[4]})
+👤 ID: {q[1]} | @{q[2]}
+📅 {q[14][:10]}
+{status_icon} Статус: {q[13]} | {feedback_icon} Отзыв: {'Да' if q[16] else 'Нет'}
+──────────────────────
+"""
     
     if len(questionnaires) > 5:
         response += f"\n... и еще {len(questionnaires) - 5} заявок"
@@ -1209,12 +1109,12 @@ async def handle_pagination(callback: types.CallbackQuery):
             status_icon = "🆕" if q[13] == "new" else "✅" if q[13] == "processed" else "📁"
             feedback_icon = "💬" if q[16] else "💭"
             response += f"""
-            <b>#{q[0]}</b> - {q[3]} ({q[4]})
-            👤 ID: {q[1]} | @{q[2]}
-            📅 {q[14][:10]}
-            {status_icon} Статус: {q[13]} | {feedback_icon} Отзыв: {'Да' if q[16] else 'Нет'}
-            ──────────────────────
-            """
+<b>#{q[0]}</b> - {q[3]} ({q[4]})
+👤 ID: {q[1]} | @{q[2]}
+📅 {q[14][:10]}
+{status_icon} Статус: {q[13]} | {feedback_icon} Отзыв: {'Да' if q[16] else 'Нет'}
+──────────────────────
+"""
         
         keyboard = get_pagination_keyboard(page, total_pages)
         await callback.message.edit_text(response, reply_markup=keyboard)
@@ -1240,15 +1140,15 @@ async def admin_new_requests(message: types.Message):
     
     for q in questionnaires[:10]:  # Ограничиваем 10 заявками
         response += f"""
-        <b>#{q[0]}</b> - {q[3]}
-        👤 ID: {q[1]} | @{q[2]}
-        📞 Телефон: {q[7]}
-        📧 Email: {q[8]}
-        📅 {q[14][:16]}
-        
-        Для отправки файла: /send_file_{q[1]}
-        ──────────────────────
-        """
+<b>#{q[0]}</b> - {q[3]}
+👤 ID: {q[1]} | @{q[2]}
+📞 Телефон: {q[7]}
+📧 Email: {q[8]}
+📅 {q[14][:16]}
+
+Для отправки файла: /send_file_{q[1]}
+──────────────────────
+"""
     
     if len(questionnaires) > 10:
         response += f"\n... и еще {len(questionnaires) - 10} новых заявок"
@@ -1270,7 +1170,6 @@ async def admin_send_file_start(message: types.Message, state: FSMContext):
     await state.set_state(AdminAction.waiting_for_user_id)
 
 @dp.message(AdminAction.waiting_for_user_id)
-@catch_state_errors
 async def admin_get_file_user_id(message: types.Message, state: FSMContext):
     """Получаем ID пользователя для отправки файла"""
     if message.text == "❌ Отменить":
@@ -1304,7 +1203,6 @@ async def admin_get_file_user_id(message: types.Message, state: FSMContext):
         await message.answer("❌ Введите корректный ID (число):")
 
 @dp.message(AdminAction.waiting_for_file)
-@catch_state_errors
 async def handle_waiting_for_file(message: types.Message, state: FSMContext):
     """Обработка файла от админа"""
     if message.text == "❌ Отменить":
@@ -1334,16 +1232,16 @@ async def admin_send_file_to_user(message: types.Message, state: FSMContext):
                 user_id,
                 document=message.document.file_id,
                 caption=f"""
-                ✅ <b>Ваша персональная подборка готова!</b>
+✅ <b>Ваша персональная подборка готова!</b>
 
-                Во вложении вы найдете файл с детальной выгрузкой тендеров, соответствующих вашим критериям.
+Во вложении вы найдете файл с детальной выгрузкой тендеров, соответствующих вашим критериям.
 
-                📎 <b>Файл: {message.document.file_name}</b>
-                👉 Если возникнут вопросы по конкретным тендерам — обращайтесь!
+📎 <b>Файл: {message.document.file_name}</b>
+👉 Если возникнут вопросы по конкретным тендерам — обращайтесь!
 
-                С уважением, команда ТРИТИКА.
-                https://tritika.ru/
-                """
+С уважением, команда ТРИТИКА.
+https://tritika.ru/
+"""
             )
             file_name = message.document.file_name
         elif message.photo:
@@ -1351,15 +1249,15 @@ async def admin_send_file_to_user(message: types.Message, state: FSMContext):
                 user_id,
                 photo=message.photo[-1].file_id,
                 caption=f"""
-                ✅ <b>Ваша персональная подборка готова!</b>
+✅ <b>Ваша персональная подборка готова!</b>
 
-                В приложении вы найдете выгрузку тендеров, соответствующих вашим критериям.
+В приложении вы найдете выгрузку тендеров, соответствующих вашим критериям.
 
-                👉 Если возникнут вопросы по конкретным тендерам — обращайтесь!
+👉 Если возникнут вопросы по конкретным тендерам — обращайтесь!
 
-                С уважением, команда ТРИТИКА.
-                https://tritika.ru/
-                """
+С уважением, команда ТРИТИКА.
+https://tritika.ru/
+"""
             )
             file_name = "photo.jpg"
         
@@ -1409,7 +1307,7 @@ async def admin_send_file_to_user(message: types.Message, state: FSMContext):
 
 С уважением, команда ТРИТИКА.
 https://tritika.ru/
-            """
+"""
             await bot.send_message(user_id, tender_export)
         
         # Подтверждение админу
@@ -1500,7 +1398,6 @@ async def admin_start_mailing(message: types.Message, state: FSMContext):
     await state.set_state(AdminAction.waiting_for_mailing_text)
 
 @dp.message(AdminAction.waiting_for_mailing_text)
-@catch_state_errors
 async def admin_process_mailing_text(message: types.Message, state: FSMContext):
     """Обработка текста рассылки"""
     if message.text == "❌ Отменить":
@@ -1700,12 +1597,12 @@ async def admin_show_feedback_details(message: types.Message):
     
     for i, feedback in enumerate(feedbacks[:5], 1):
         response += f"""
-        <b>{i}. #{feedback[0]} - {feedback[2] or 'Без имени'}</b>
-        🏢 Компания: {feedback[3] or 'Не указана'}
-        📅 Дата: {feedback[5] or 'Не указана'}
-        📝 Отзыв: {feedback[6] or 'Без текста'}
-        ──────────────────────
-        """
+<b>{i}. #{feedback[0]} - {feedback[2] or 'Без имени'}</b>
+🏢 Компания: {feedback[3] or 'Не указана'}
+📅 Дата: {feedback[5] or 'Не указана'}
+📝 Отзыв: {feedback[6] or 'Без текста'}
+──────────────────────
+"""
     
     if len(feedbacks) > 5:
         response += f"\n... и еще {len(feedbacks) - 5} отзывов"
@@ -1716,7 +1613,6 @@ async def admin_show_feedback_details(message: types.Message):
 
 # =========== ОБЩЕНИЕ МЕЖДУ КЛИЕНТОМ И АДМИНОМ ===========
 @dp.message(F.text == "📨 Написать менеджеру")
-@catch_state_errors
 async def start_message_to_admin(message: types.Message, state: FSMContext):
     """Пользователь начинает диалог с админом"""
     if message.from_user.id == ADMIN_ID:
@@ -1747,7 +1643,6 @@ async def admin_start_message_to_user(message: types.Message, state: FSMContext)
     await state.update_data(is_admin_to_user=True)
 
 @dp.message(AdminAction.waiting_for_message)
-@catch_state_errors
 async def send_message_between_users(message: types.Message, state: FSMContext):
     """Отправка сообщения между пользователем и админом"""
     if message.text == "❌ Отменить":
@@ -1917,7 +1812,7 @@ async def admin_statistics(message: types.Message):
 {last_activity}
 
 <b>Дата:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
-        """
+"""
         
         await message.answer(stats_text, reply_markup=get_admin_keyboard())
         
@@ -1926,7 +1821,6 @@ async def admin_statistics(message: types.Message):
         await message.answer("❌ Ошибка получения статистики", reply_markup=get_admin_keyboard())
 
 @dp.message(F.text == "❌ Отменить")
-@catch_state_errors
 async def cancel_action(message: types.Message, state: FSMContext):
     """Отмена текущего действия"""
     current_state = await state.get_state()
@@ -2101,7 +1995,7 @@ async def run_bot():
 
 def main():
     """Основная функция запуска приложения"""
-    logger.info("🚀 Запуск приложения ТРИТИКА на Railway...")
+    logger.info("🚀 Запуск приложения ТРИТИКА...")
     
     # ЗАПУСКАЕМ HTTP СЕРВЕР В ОТДЕЛЬНОМ ПОТОКЕ
     http_thread = threading.Thread(target=run_healthcheck_server, daemon=True)
