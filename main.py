@@ -265,7 +265,7 @@ def get_admin_keyboard():
     )
     return keyboard
 
-def get_cancel_keyboard():
+def get_cancel_keyboard(is_admin=False):
     keyboard = ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отменить")]],
         resize_keyboard=True
@@ -325,6 +325,7 @@ def save_questionnaire_to_db(user_data):
         questionnaire_id = cursor.lastrowid
         conn.close()
         
+        logger.info(f"✅ Анкета #{questionnaire_id} сохранена в базу данных для пользователя {user_data['user_id']}")
         return questionnaire_id
     except Exception as e:
         logger.error(f"Ошибка сохранения в БД: {e}", exc_info=True)
@@ -589,7 +590,7 @@ async def start_mailing_task(message_text, admin_id):
         # Небольшая задержка, чтобы не превысить лимиты Telegram
         await asyncio.sleep(0.1)
     
-    # Сохраняем статистику
+    # Сохраняем статистики
     save_mailing_stats(total_users, successful, failed, message_text)
     
     # Итоговый отчет
@@ -653,6 +654,10 @@ async def main_menu(message: types.Message):
 @catch_state_errors
 async def start_questionnaire(message: types.Message, state: FSMContext):
     """Начало заполнения анкеты"""
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Вы администратор, вам не нужно заполнять анкету.", reply_markup=get_admin_keyboard())
+        return
+    
     try:
         # Проверяем, не заполняется ли уже анкета
         current_state = await state.get_state()
@@ -1019,6 +1024,10 @@ async def process_regions(message: types.Message, state: FSMContext):
 @catch_state_errors
 async def start_feedback(message: types.Message, state: FSMContext):
     """Начало оставления отзыва"""
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Вы администратор, вам не нужно оставлять отзыв.", reply_markup=get_admin_keyboard())
+        return
+    
     try:
         # Проверяем, заполнял ли пользователь анкету
         questionnaire = get_questionnaire_by_user_id(message.from_user.id)
@@ -1710,6 +1719,10 @@ async def admin_show_feedback_details(message: types.Message):
 @catch_state_errors
 async def start_message_to_admin(message: types.Message, state: FSMContext):
     """Пользователь начинает диалог с админом"""
+    if message.from_user.id == ADMIN_ID:
+        await message.answer("Вы администратор, вы не можете написать самому себе.", reply_markup=get_admin_keyboard())
+        return
+    
     await message.answer(
         "📨 <b>Написать менеджеру</b>\n\n"
         "Введите ваше сообщение для менеджера:\n"
@@ -1822,6 +1835,7 @@ async def quick_reply_command(message: types.Message):
 @dp.message(F.text == "ℹ️ О компании")
 async def about_company(message: types.Message):
     """Информация о компании"""
+    keyboard = get_admin_keyboard() if message.from_user.id == ADMIN_ID else get_main_keyboard()
     await message.answer(
         "🏢 <b>О компании ТРИТИКА</b>\n\n"
         "<b>Мы помогаем бизнесу находить выгодные тендеры</b>\n\n"
@@ -1838,7 +1852,7 @@ async def about_company(message: types.Message):
         "Пн-Пт: 9:00-18:00\n"
         "Сб: 10:00-15:00\n"
         "Вс: выходной",
-        reply_markup=get_main_keyboard()
+        reply_markup=keyboard
     )
 
 @dp.message(F.text == "📋 Статистика")
