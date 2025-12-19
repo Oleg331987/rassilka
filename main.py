@@ -93,53 +93,7 @@ def validate_inn(inn: str) -> bool:
     inn = inn.strip()
     if len(inn) not in (10, 12) or not inn.isdigit():
         return False
-    
-    if len(inn) == 10:
-        # Проверка контрольной цифры для 10-значного ИНН
-        weights = [2, 4, 10, 3, 5, 9, 4, 6, 8]
-        check_sum = sum(int(inn[i]) * weights[i] for i in range(9)) % 11
-        check_digit = check_sum % 10 if check_sum < 10 else 0
-        return int(inn[9]) == check_digit
-    return True
-
-# Декоратор для обработки ошибок в состояниях
-def catch_state_errors(func):
-    """Декоратор для обработки ошибок в состояниях"""
-    async def wrapper(message: types.Message, state: FSMContext, *args, **kwargs):
-        try:
-            return await func(message, state, *args, **kwargs)
-        except Exception as e:
-            logger.error(f"Ошибка в состоянии {func.__name__}: {e}", exc_info=True)
-            try:
-                await state.clear()
-                keyboard = get_admin_keyboard() if message.from_user.id == ADMIN_ID else get_main_keyboard()
-                await message.answer(
-                    "⚠️ Произошла ошибка. Возврат в главное меню.",
-                    reply_markup=keyboard
-                )
-            except:
-                pass
-    return wrapper
-
-# Резервное копирование базы данных
-def backup_database():
-    """Создание резервной копии базы данных"""
-    try:
-        os.makedirs("backups", exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = f"backups/tenders_backup_{timestamp}.db"
-        
-        if os.path.exists("tenders.db"):
-            shutil.copy2("tenders.db", backup_name)
-            logger.info(f"✅ Резервная копия создана: {backup_name}")
-            
-            # Удаляем старые бекапы (оставляем последние 7)
-            backups = sorted([f for f in os.listdir("backups") if f.startswith("tenders_backup")])
-            if len(backups) > 7:
-                for old_backup in backups[:-7]:
-                    os.remove(f"backups/{old_backup}")
-    except Exception as e:
-        logger.error(f"❌ Ошибка создания резервной копии: {e}")
+    return True  # Упростим валидацию
 
 # Инициализация базы данных
 def init_db():
@@ -212,7 +166,6 @@ def init_db():
 
 # Инициализируем БД
 init_db()
-backup_database()
 
 # =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
@@ -373,69 +326,6 @@ def get_questionnaire_by_user_id(user_id):
         logger.error(f"Ошибка получения анкеты: {e}")
         return None
 
-def update_questionnaire_status(questionnaire_id, status):
-    """Обновляем статус анкеты"""
-    try:
-        conn = sqlite3.connect('tenders.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute(
-            "UPDATE questionnaires SET status = ? WHERE id = ?",
-            (status, questionnaire_id)
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка обновления статуса: {e}")
-        return False
-
-def save_message_to_db(from_id, to_id, message_text):
-    """Сохраняем сообщение в базу"""
-    try:
-        conn = sqlite3.connect('tenders.db', check_same_thread=False)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO messages (from_id, to_id, message_text, created_at) VALUES (?, ?, ?, ?)",
-            (from_id, to_id, message_text, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка сохранения сообщения: {e}")
-        return False
-
-def save_feedback(user_id, feedback_text, is_positive=True):
-    """Сохраняем отзыв пользователя"""
-    try:
-        conn = sqlite3.connect('tenders.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Получаем анкету пользователя
-        cursor.execute(
-            "SELECT id FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
-            (user_id,)
-        )
-        questionnaire = cursor.fetchone()
-        
-        if questionnaire:
-            questionnaire_id = questionnaire[0]
-            cursor.execute(
-                """UPDATE questionnaires 
-                SET feedback_given = 1, 
-                    feedback_date = ?,
-                    feedback_text = ?
-                WHERE id = ?""",
-                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), feedback_text, questionnaire_id)
-            )
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        logger.error(f"Ошибка сохранения отзыва: {e}")
-        return False
-
 def get_all_users():
     """Получаем всех пользователей для рассылки"""
     try:
@@ -469,19 +359,36 @@ def save_mailing_stats(total_users, successful, failed, message_text):
         logger.error(f"Ошибка сохранения статистики рассылки: {e}")
         return False
 
-def update_last_mailing_date(user_id):
-    """Обновляем дату последней рассылки для пользователя"""
+def save_feedback(user_id, feedback_text, is_positive=True):
+    """Сохраняем отзыв пользователя"""
     try:
         conn = sqlite3.connect('tenders.db', check_same_thread=False)
         cursor = conn.cursor()
+        
+        # Получаем анкету пользователя
         cursor.execute(
-            "UPDATE questionnaires SET last_mailing_date = ? WHERE user_id = ?",
-            (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), user_id)
+            "SELECT id FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
+            (user_id,)
         )
+        questionnaire = cursor.fetchone()
+        
+        if questionnaire:
+            questionnaire_id = questionnaire[0]
+            cursor.execute(
+                """UPDATE questionnaires 
+                SET feedback_given = 1, 
+                    feedback_date = ?,
+                    feedback_text = ?
+                WHERE id = ?""",
+                (datetime.now().strftime("%Y-%m-%d %H:%M:%S"), feedback_text, questionnaire_id)
+            )
+        
         conn.commit()
         conn.close()
+        return True
     except Exception as e:
-        logger.error(f"Ошибка обновления даты рассылки: {e}")
+        logger.error(f"Ошибка сохранения отзыва: {e}")
+        return False
 
 async def send_mailing_to_user(user_id, message_text):
     """Отправляем рассылку одному пользователю"""
@@ -491,7 +398,6 @@ async def send_mailing_to_user(user_id, message_text):
             message_text,
             parse_mode=ParseMode.HTML
         )
-        update_last_mailing_date(user_id)
         return True
     except Exception as e:
         logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
@@ -516,8 +422,7 @@ async def start_mailing_task(message_text, admin_id):
     
     await bot.send_message(
         admin_id,
-        f"🚀 Начинаю рассылку для {total_users} пользователей...\n\n"
-        f"Сообщение: {message_text[:100]}..."
+        f"🚀 Начинаю рассылку для {total_users} пользователей..."
     )
     
     successful = 0
@@ -625,7 +530,6 @@ async def start_questionnaire(message: types.Message, state: FSMContext):
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(Questionnaire.waiting_for_name)
-    await state.update_data(user_id=message.from_user.id, username=message.from_user.username or "Не указан")
 
 @dp.message(Questionnaire.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
@@ -639,7 +543,7 @@ async def process_name(message: types.Message, state: FSMContext):
         await message.answer("❌ ФИО должно содержать минимум 2 символа. Введите снова:")
         return
     
-    await state.update_data(full_name=name)
+    await state.update_data(full_name=name, user_id=message.from_user.id, username=message.from_user.username or "Не указан")
     await message.answer(
         "✅ <b>ФИО сохранено</b>\n\n"
         "<b>Введите полное название вашей компании:</b>\n"
@@ -666,7 +570,7 @@ async def process_company(message: types.Message, state: FSMContext):
         "<b>Введите ИНН компании:</b>\n"
         "<i>10 или 12 цифр без пробелов</i>\n"
         "<i>Пример: 1234567890</i>",
-        reply_markup=get_cancel_keyboard()
+        reply_mup=get_cancel_keyboard()
     )
     await state.set_state(Questionnaire.waiting_for_inn)
 
@@ -722,9 +626,8 @@ async def process_phone(message: types.Message, state: FSMContext):
     
     phone = message.text.strip()
     # Простая валидация телефона
-    digits = sum(c.isdigit() for c in phone)
-    if digits < 10:
-        await message.answer("❌ Телефон должен содержать минимум 10 цифр. Введите снова:")
+    if len(phone) < 10:
+        await message.answer("❌ Телефон должен содержать минимум 10 символов. Введите снова:")
         return
     
     await state.update_data(phone=phone)
@@ -1134,9 +1037,6 @@ async def admin_start_mailing(message: types.Message, state: FSMContext):
         "• &lt;i&gt;курсив&lt;/i&gt;\n"
         "• &lt;u&gt;подчеркнутый&lt;/u&gt;\n"
         "• &lt;a href='ссылка'&gt;текст ссылки&lt;/a&gt;\n\n"
-        "<i>Пример:</i>\n"
-        "&lt;b&gt;Новые тендеры!&lt;/b&gt;\n"
-        "Мы нашли для вас новые тендеры по вашим критериям.\n\n"
         "Напишите текст рассылки:",
         reply_markup=get_cancel_keyboard()
     )
@@ -1253,13 +1153,9 @@ async def admin_statistics(message: types.Message):
         cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE status = 'processed'")
         processed = cursor.fetchone()[0]
         
-        # Отправленные файлы
-        cursor.execute("SELECT COUNT(*) FROM sent_files")
-        sent_files = cursor.fetchone()[0]
-        
-        # Сообщения
-        cursor.execute("SELECT COUNT(*) FROM messages")
-        messages = cursor.fetchone()[0]
+        # Уникальные пользователи
+        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM questionnaires")
+        unique_users = cursor.fetchone()[0]
         
         # Отзывы
         cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE feedback_given = 1")
@@ -1268,38 +1164,6 @@ async def admin_statistics(message: types.Message):
         # Рассылки
         cursor.execute("SELECT COUNT(*) FROM mailings")
         mailings = cursor.fetchone()[0]
-        
-        # Уникальные пользователи
-        cursor.execute("SELECT COUNT(DISTINCT user_id) FROM questionnaires")
-        unique_users = cursor.fetchone()[0]
-        
-        # Среднее количество заявок на пользователя
-        avg_per_user = total / unique_users if unique_users > 0 else 0
-        
-        # Последняя активность
-        cursor.execute("SELECT MAX(created_at) FROM questionnaires")
-        last_activity = cursor.fetchone()[0] or "Нет данных"
-        
-        # Статистика по месяцам
-        cursor.execute("""
-            SELECT strftime('%Y-%m', created_at) as month, COUNT(*) as count
-            FROM questionnaires 
-            GROUP BY strftime('%Y-%m', created_at)
-            ORDER BY month DESC
-            LIMIT 6
-        """)
-        monthly_stats = cursor.fetchall()
-        
-        # Статистика по регионам
-        cursor.execute("""
-            SELECT regions, COUNT(*) as count
-            FROM questionnaires 
-            WHERE regions IS NOT NULL AND regions != ''
-            GROUP BY regions
-            ORDER BY count DESC
-            LIMIT 10
-        """)
-        region_stats = cursor.fetchall()
         
         # Статистика по отзывам
         cursor.execute("SELECT COUNT(*) FROM questionnaires WHERE feedback_text LIKE '✅ Положительный:%'")
@@ -1314,157 +1178,57 @@ async def admin_statistics(message: types.Message):
         total_mailing_users = mailing_stats[0] or 0
         total_successful = mailing_stats[1] or 0
         total_failed = mailing_stats[2] or 0
-        mailing_success_rate = (total_successful / total_mailing_users * 100) if total_mailing_users > 0 else 0
         
         conn.close()
         
         # Формируем статистику
         stats_text = f"""
-📊 <b>ПОДРОБНАЯ СТАТИСТИКА БОТА</b>
+📊 <b>СТАТИСТИКА БОТА</b>
 
 <b>📈 Основные показатели:</b>
 • Всего заявок: <b>{total}</b>
 • Новые заявки: <b>{new}</b>
 • Обработанные: <b>{processed}</b>
 • Уникальных пользователей: <b>{unique_users}</b>
-• Среднее заявок на пользователя: <b>{avg_per_user:.1f}</b>
-
-<b>💬 Активность:</b>
-• Отправлено файлов: <b>{sent_files}</b>
-• Сообщений в чатах: <b>{messages}</b>
-• Получено отзывов: <b>{feedbacks}</b>
-• Проведено рассылок: <b>{mailings}</b>
 
 <b>⭐ Отзывы:</b>
+• Всего отзывов: <b>{feedbacks}</b>
 • Положительных: <b>{positive_feedbacks}</b>
 • Критических: <b>{negative_feedbacks}</b>
 • Процент положительных: <b>{(positive_feedbacks/feedbacks*100 if feedbacks > 0 else 0):.1f}%</b>
 
-<b>📤 Эффективность рассылок:</b>
+<b>📤 Рассылки:</b>
+• Всего рассылок: <b>{mailings}</b>
 • Всего отправлено: <b>{total_mailing_users}</b>
 • Успешно: <b>{total_successful}</b>
 • Неудачно: <b>{total_failed}</b>
-• Успешность: <b>{mailing_success_rate:.1f}%</b>
-
-<b>📅 Активность по месяцам (последние 6):</b>
-"""
-        
-        for month, count in monthly_stats:
-            stats_text += f"• {month}: <b>{count}</b> заявок\n"
-        
-        if region_stats:
-            stats_text += f"\n<b>🌍 Топ регионов по заявкам:</b>\n"
-            for region, count in region_stats[:5]:  # Только топ 5
-                stats_text += f"• {region}: <b>{count}</b> заявок\n"
-        
-        stats_text += f"""
-        
-<b>⏰ Последняя активность:</b>
-{last_activity}
 
 <b>📅 Дата отчета:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
         """
         
-        # Добавляем кнопку для экспорта статистики
-        keyboard = ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📥 Экспорт статистики")],
-                [KeyboardButton(text="🏠 Главное меню")]
-            ],
-            resize_keyboard=True
-        )
-        
-        await message.answer(stats_text, reply_markup=keyboard)
+        await message.answer(stats_text, reply_markup=get_admin_keyboard())
         
     except Exception as e:
         logger.error(f"Ошибка получения статистики: {e}")
         await message.answer("❌ Ошибка получения статистики", reply_markup=get_admin_keyboard())
 
-@dp.message(F.text == "📥 Экспорт статистики")
-async def admin_export_statistics(message: types.Message):
-    """Экспорт статистики в CSV"""
-    if message.from_user.id != ADMIN_ID:
-        return
-    
-    try:
-        conn = sqlite3.connect('tenders.db', check_same_thread=False)
-        cursor = conn.cursor()
-        
-        # Получаем все заявки
-        cursor.execute("""
-            SELECT id, user_id, username, full_name, company_name, inn, 
-                   phone, email, activity_sphere, regions, status, 
-                   created_at, feedback_given, feedback_text
-            FROM questionnaires 
-            ORDER BY created_at DESC
-        """)
-        questionnaires = cursor.fetchall()
-        
-        # Создаем CSV в памяти
-        output = io.StringIO()
-        writer = csv.writer(output, delimiter=',', quotechar='"', quoting=csv.QUOTE_MINIMAL)
-        
-        # Заголовки
-        writer.writerow([
-            'ID', 'User ID', 'Username', 'ФИО', 'Компания', 'ИНН',
-            'Телефон', 'Email', 'Сфера деятельности', 'Регионы',
-            'Статус', 'Дата создания', 'Оставил отзыв', 'Текст отзыва'
-        ])
-        
-        # Данные
-        for row in questionnaires:
-            writer.writerow([
-                row[0], row[1], row[2] or '', row[3] or '', row[4] or '', row[5] or '',
-                row[6] or '', row[7] or '', row[8] or '', row[9] or '',
-                row[10] or '', row[11] or '', 'Да' if row[12] else 'Нет', row[13] or ''
-            ])
-        
-        # Преобразуем в байты
-        csv_bytes = output.getvalue().encode('utf-8-sig')
-        
-        # Отправляем файл
-        await message.answer_document(
-            types.BufferedInputFile(
-                csv_bytes,
-                filename=f"statistics_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-            ),
-            caption=f"📊 <b>Экспорт статистики</b>\n\n"
-                   f"Дата выгрузки: {datetime.now().strftime('%d.%m.%Y %H:%M')}\n"
-                   f"Всего записей: {len(questionnaires)}",
-            reply_markup=get_admin_keyboard()
-        )
-        
-    except Exception as e:
-        logger.error(f"Ошибка экспорта статистики: {e}", exc_info=True)
-        await message.answer("❌ Ошибка при создании файла статистики.", reply_markup=get_admin_keyboard())
-
-# =========== ОБЩЕНИЕ МЕЖДУ КЛИЕНТОМ И АДМИНОМ ===========
+# =========== ОБЩЕНИЕ С МЕНЕДЖЕРОМ ===========
 @dp.message(F.text == "📨 Написать менеджеру")
-async def start_message_to_admin(message: types.Message, state: FSMContext):
-    """Пользователь начинает диалог с админом"""
+async def write_to_manager(message: types.Message):
+    """Пользователь хочет написать менеджеру"""
     if message.from_user.id == ADMIN_ID:
         await message.answer("Вы администратор, вы не можете написать самому себе.", reply_markup=get_admin_keyboard())
         return
     
-    await message.answer(
-        "📨 <b>Написать менеджеру</b>\n\n"
-        "Введите ваше сообщение для менеджера:\n"
-        "<i>Опишите вопрос или ситуацию подробно</i>",
-        reply_markup=get_cancel_keyboard()
-    )
-    
-    # Просто сохраняем сообщение от пользователя
-    message_text = "Пользователь хочет написать менеджеру (ждет ответа через это сообщение)"
-    save_message_to_db(message.from_user.id, ADMIN_ID, message_text)
-    
-    # Отправляем админу уведомление
     try:
+        # Отправляем уведомление админу
         await bot.send_message(
             ADMIN_ID,
             f"📨 <b>Пользователь хочет написать вам сообщение</b>\n\n"
             f"👤 Пользователь: @{message.from_user.username or 'не указан'} (ID: {message.from_user.id})\n\n"
             f"<i>Пользователь нажал кнопку 'Написать менеджеру' и ожидает вашего ответа.</i>"
         )
+        
         await message.answer(
             "✅ Ваше желание написать менеджеру зафиксировано. Менеджер свяжется с вами в ближайшее время.",
             reply_markup=get_main_keyboard()
@@ -1475,7 +1239,7 @@ async def start_message_to_admin(message: types.Message, state: FSMContext):
             reply_markup=get_main_keyboard()
         )
 
-# =========== ДОПОЛНИТЕЛЬНЫЕ КОМАНДЫ ===========
+# =========== ИНФОРМАЦИЯ О КОМПАНИИ ===========
 @dp.message(F.text == "ℹ️ О компании")
 async def about_company(message: types.Message):
     """Информация о компании"""
@@ -1499,6 +1263,7 @@ async def about_company(message: types.Message):
         reply_markup=keyboard
     )
 
+# =========== ОТМЕНА ===========
 @dp.message(F.text == "❌ Отменить")
 async def cancel_action(message: types.Message, state: FSMContext):
     """Отмена текущего действия"""
@@ -1515,7 +1280,7 @@ async def cancel_action(message: types.Message, state: FSMContext):
     )
     await state.clear()
 
-# =========== ОБРАБОТКА ВСЕХ СООБЩЕНИЙ ===========
+# =========== ОБРАБОТКА ВСЕХ ОСТАЛЬНЫХ СООБЩЕНИЙ ===========
 @dp.message()
 async def handle_all_messages(message: types.Message):
     """Обработка всех остальных сообщений"""
@@ -1525,8 +1290,7 @@ async def handle_all_messages(message: types.Message):
             "📊 Все заявки - просмотр всех анкет\n"
             "🆕 Новые заявки - только новые заявки\n"
             "📤 Сделать рассылку - массовая рассылка\n"
-            "📋 Статистика - подробная статистика\n"
-            "🏠 Главное меню - вернуться в меню",
+            "📋 Статистика - подробная статистика",
             reply_markup=get_admin_keyboard()
         )
     else:
@@ -1538,97 +1302,6 @@ async def handle_all_messages(message: types.Message):
             "ℹ️ О компании - информация",
             reply_markup=get_main_keyboard()
         )
-
-# =========== АВТОМАТИЧЕСКАЯ РАССЫЛКА КАЖДЫЕ 2 НЕДЕЛИ ===========
-async def scheduled_mailing():
-    """Автоматическая рассылка каждые 2 недели"""
-    while True:
-        try:
-            # Ждем 14 дней (2 недели)
-            await asyncio.sleep(14 * 24 * 60 * 60)
-            
-            # Получаем всех пользователей
-            users = get_all_users()
-            
-            if not users:
-                logger.info("ℹ️ Нет пользователей для автоматической рассылки")
-                continue
-            
-            # Проверяем, когда была последняя рассылка
-            conn = sqlite3.connect('tenders.db', check_same_thread=False)
-            cursor = conn.cursor()
-            cursor.execute("SELECT MAX(mailing_date) FROM mailings")
-            last_mailing_date = cursor.fetchone()[0]
-            conn.close()
-            
-            # Если была рассылка менее 13 дней назад, пропускаем
-            if last_mailing_date:
-                last_date = datetime.strptime(last_mailing_date, "%Y-%m-%d %H:%M:%S")
-                days_passed = (datetime.now() - last_date).days
-                if days_passed < 13:
-                    logger.info(f"ℹ️ Последняя рассылка была {days_passed} дней назад, пропускаем")
-                    continue
-            
-            # Текст для автоматической рассылки
-            mailing_text = """<b>🎯 Важные новости от ТРИТИКА!</b>
-
-Напоминаем, что наш сервис продолжает искать для вас тендеры по вашим параметрам.
-
-<b>Что мы предлагаем:</b>
-• Ежедневный мониторинг новых тендеров
-• Актуальные данные по 44-ФЗ и 223-ФЗ
-• Консультации по участию
-
-<b>Нужна новая выгрузка?</b>
-Ответьте на это сообщение или нажмите "📨 Написать менеджеру".
-
-С уважением, команда ТРИТИКА.
-📞 +7 (904) 653-69-87
-🌐 https://tritika.ru/"""
-            
-            logger.info(f"🚀 Запускаю автоматическую рассылку для {len(users)} пользователей")
-            
-            # Отправляем рассылку
-            successful = 0
-            failed = 0
-            
-            for user_id in users:
-                try:
-                    await bot.send_message(
-                        user_id,
-                        mailing_text,
-                        parse_mode=ParseMode.HTML
-                    )
-                    successful += 1
-                    update_last_mailing_date(user_id)
-                except Exception as e:
-                    failed += 1
-                    logger.error(f"❌ Ошибка отправки пользователю {user_id}: {e}")
-                
-                # Задержка между отправками
-                await asyncio.sleep(0.1)
-            
-            # Сохраняем статистику
-            save_mailing_stats(len(users), successful, failed, "Автоматическая рассылка")
-            
-            logger.info(f"✅ Автоматическая рассылка завершена: {successful} успешно, {failed} ошибок")
-            
-            # Отправляем отчет админу
-            try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"📊 <b>Автоматическая рассылка завершена</b>\n\n"
-                    f"• Всего пользователей: {len(users)}\n"
-                    f"• Успешно отправлено: {successful}\n"
-                    f"• С ошибками: {failed}\n"
-                    f"• Дата: {datetime.now().strftime('%d.%m.%Y %H:%M')}"
-                )
-            except Exception as e:
-                logger.error(f"❌ Ошибка отправки отчета админу: {e}")
-                
-        except Exception as e:
-            logger.error(f"❌ Ошибка в scheduled_mailing: {e}", exc_info=True)
-            await asyncio.sleep(3600)  # Ждем час при ошибке
 
 # =========== ПРОСТОЙ HTTP СЕРВЕР ДЛЯ HEALTHCHECK ===========
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -1643,7 +1316,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
             self.end_headers()
     
     def log_message(self, format, *args):
-        # Отключаем стандартное логирование запросов
         pass
 
 def run_healthcheck_server():
@@ -1654,26 +1326,7 @@ def run_healthcheck_server():
     server.serve_forever()
 
 # =========== ЗАПУСК БОТА ===========
-async def run_bot():
-    """Запуск Telegram бота"""
-    logger.info("🚀 Запуск Telegram бота...")
-    
-    try:
-        # Проверяем соединение с ботом
-        bot_info = await bot.get_me()
-        logger.info(f"✅ Бот запущен: @{bot_info.username}")
-        
-        # Запускаем автоматическую рассылку в фоне
-        asyncio.create_task(scheduled_mailing())
-        logger.info("✅ Запущена автоматическая рассылка (каждые 2 недели)")
-        
-        # Запускаем бота
-        await dp.start_polling(bot, skip_updates=True)
-    except Exception as e:
-        logger.error(f"❌ Ошибка запуска бота: {e}", exc_info=True)
-        raise
-
-def main():
+async def main():
     """Основная функция запуска приложения"""
     logger.info("🚀 Запуск приложения ТРИТИКА...")
     
@@ -1683,19 +1336,21 @@ def main():
     
     logger.info(f"✅ Healthcheck сервер запущен в отдельном потоке")
     
-    # Даем время серверу запуститься и начать отвечать на запросы
+    # Даем время серверу запуститься
     time.sleep(2)
     
-    # Запускаем Telegram бота в основном потоке
+    # Запускаем Telegram бота
     try:
-        # Используем отдельный event loop для бота
-        asyncio.run(run_bot())
-    except KeyboardInterrupt:
-        logger.info("🛑 Бот остановлен пользователем")
+        # Проверяем соединение с ботом
+        bot_info = await bot.get_me()
+        logger.info(f"✅ Бот запущен: @{bot_info.username}")
+        
+        # Запускаем бота
+        await dp.start_polling(bot, skip_updates=True)
     except Exception as e:
-        logger.error(f"❌ Критическая ошибка: {e}", exc_info=True)
-        sys.exit(1)
+        logger.error(f"❌ Ошибка запуска бота: {e}", exc_info=True)
+        raise
 
 # =========== ЗАПУСК ПРИЛОЖЕНИЯ ===========
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
