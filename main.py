@@ -58,6 +58,9 @@ class Config:
         self.WORK_END_HOUR = 17
         self.WORK_DAYS = [0, 1, 2, 3, 4]  # пн-пт (0-пн, 4-пт)
         
+        # Путь к файлу анкеты
+        self.QUESTIONNAIRE_FILE = "Anketa.docx"
+        
         # Создаем необходимые директории
         os.makedirs(self.BACKUP_DIR, exist_ok=True)
         os.makedirs(self.LOGS_DIR, exist_ok=True)
@@ -236,7 +239,8 @@ class Database:
                 last_mailing_date TEXT,
                 mailing_group INTEGER DEFAULT 0,
                 responses_count INTEGER DEFAULT 0,
-                unsubscribe BOOLEAN DEFAULT 0
+                unsubscribe BOOLEAN DEFAULT 0,
+                UNIQUE(user_id, full_name, company_name, inn)  -- Добавляем уникальность
             )
             ''')
             
@@ -322,21 +326,43 @@ class Database:
             (user_id,)
         )
     
-    async def save_questionnaire(self, user_data: dict) -> Optional[int]:
-        """Сохранение анкеты"""
+    async def check_duplicate_questionnaire(self, user_data: dict) -> bool:
+        """Проверка на дубликат анкеты"""
         try:
-            # Проверяем, не заполнял ли пользователь анкету сегодня
-            today = datetime.now().strftime("%Y-%m-%d")
-            existing = await self.fetch_one(
-                "SELECT id FROM questionnaires WHERE user_id = ? AND DATE(created_at) = ?",
-                (user_data['user_id'], today)
+            query = '''
+            SELECT id FROM questionnaires 
+            WHERE user_id = ? AND full_name = ? AND company_name = ? AND inn = ?
+            '''
+            params = (
+                user_data['user_id'],
+                user_data['full_name'],
+                user_data['company_name'],
+                user_data['inn']
             )
             
-            if existing:
-                return existing['id']
+            result = await self.fetch_one(query, params)
+            return result is not None
+        except Exception as e:
+            logger.error(f"Ошибка проверки дубликата: {e}")
+            return False
+    
+    async def save_questionnaire(self, user_data: dict) -> Optional[int]:
+        """Сохранение анкеты с проверкой на дубликаты"""
+        try:
+            # Проверяем на дубликат
+            if await self.check_duplicate_questionnaire(user_data):
+                logger.warning(f"⚠️ Попытка сохранения дубликата анкеты для пользователя {user_data['user_id']}")
+                # Получаем ID существующей анкеты
+                existing = await self.fetch_one(
+                    "SELECT id FROM questionnaires WHERE user_id = ? AND inn = ? ORDER BY created_at DESC LIMIT 1",
+                    (user_data['user_id'], user_data['inn'])
+                )
+                if existing:
+                    return existing['id']
+                return None
             
             query = '''
-            INSERT INTO questionnaires 
+            INSERT OR IGNORE INTO questionnaires 
             (user_id, username, full_name, company_name, inn, contact_person, 
              phone, email, activity_sphere, industry, contract_amount, 
              regions, created_at, updated_at)
@@ -362,6 +388,18 @@ class Database:
             )
             
             cursor = await self.execute_query(query, params)
+            
+            if cursor.rowcount == 0:
+                # Запись не вставлена из-за дубликата
+                logger.warning(f"⚠️ Дубликат анкеты не сохранен для пользователя {user_data['user_id']}")
+                existing = await self.fetch_one(
+                    "SELECT id FROM questionnaires WHERE user_id = ? AND inn = ? ORDER BY created_at DESC LIMIT 1",
+                    (user_data['user_id'], user_data['inn'])
+                )
+                if existing:
+                    return existing['id']
+                return None
+            
             questionnaire_id = cursor.lastrowid
             
             # Обновляем статистику
@@ -536,7 +574,7 @@ def get_user_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Заполнить анкету онлайн")],
-            [KeyboardButton(text="📥 Скачать анкету")],
+            [KeyboardButton(text="📥 Скачать анкету в Word")],
             [KeyboardButton(text="❓ Как это работает?")],
             [KeyboardButton(text="📞 Консультация"), KeyboardButton(text="ℹ️ Помощь")]
         ],
@@ -560,7 +598,7 @@ def get_admin_keyboard():
 def get_cancel_keyboard():
     """Клавиатура отмены"""
     return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отменить")]],
+        keyboard=[[KeyboardButton(text="❌ Отменить заполнение")]],
         resize_keyboard=True
     )
 
@@ -755,8 +793,11 @@ async def global_error_handler(event, exception):
 
 # =========== ОБРАБОТЧИКИ КОМАНД ===========
 @dp.message(Command("start"))
-async def cmd_start(message: types.Message):
+async def cmd_start(message: types.Message, state: FSMContext):
     """Старт бота"""
+    # Очищаем состояние при старте
+    await state.clear()
+    
     if message.from_user.id == config.ADMIN_ID:
         await message.answer(
             "🛠️ <b>Добро пожаловать в панель администратора!</b>\n\n"
@@ -774,9 +815,11 @@ async def cmd_start(message: types.Message):
             "🤖 <b>Привет! Я бот Тритики.</b>\n\n"
             "Помогаю компаниям находить выгодные тендеры.\n\n"
             "🎯 <b>Хотите бесплатно получить подборку тендеров по вашей сфере?</b>\n"
-            "Заполните анкету - это займет всего 5 минут!\n\n"
+            "Выберите способ заполнения анкеты:\n\n"
+            "1️⃣ <b>Заполнить онлайн</b> - быстро и удобно в чате\n"
+            "2️⃣ <b>Скачать анкету</b> - заполнить в Word и отправить нам\n\n"
             "⏱️ <b>Что будет дальше:</b>\n"
-            "1. Вы заполняете анкету онлайн\n"
+            "1. Вы заполняете анкету\n"
             "2. Мы ищем для вас актуальные тендеры\n"
             "3. Присылаем подборку на почту и в Telegram\n"
             "4. Помогаем с подготовкой заявки\n\n"
@@ -794,12 +837,13 @@ async def cmd_help(message: types.Message):
 /start - Начать работу с ботом
 /help - Показать эту справку
 /unsubscribe - Отписаться от рассылок
+/myan - Мои анкеты
 
 <b>Для администратора:</b>
 /admin - Панель администратора
 
 <b>📱 Основные функции:</b>
-• Заполнить анкету для поиска тендеров
+• Заполнить анкету для поиска тендеров (онлайн или в Word)
 • Получить подборку актуальных тендеров
 • Консультация по участию в тендерах
 • Полезные материалы и рассылки
@@ -810,11 +854,14 @@ async def cmd_help(message: types.Message):
     await message.answer(help_text)
 
 @dp.message(Command("admin"))
-async def cmd_admin(message: types.Message):
+async def cmd_admin(message: types.Message, state: FSMContext):
     """Панель администратора"""
     if message.from_user.id != config.ADMIN_ID:
         await message.answer("⛔ У вас нет прав для доступа к панели администратора.")
         return
+    
+    # Очищаем состояние
+    await state.clear()
     
     await message.answer(
         "🛠️ <b>Панель администратора</b>\n\n"
@@ -837,12 +884,44 @@ async def cmd_unsubscribe(message: types.Message):
     else:
         await message.answer("❌ Произошла ошибка при отписке. Попробуйте позже.")
 
+@dp.message(Command("myan"))
+async def cmd_my_questionnaires(message: types.Message):
+    """Показать мои анкеты"""
+    # Получаем анкеты пользователя
+    questionnaires = await db.fetch_all(
+        "SELECT id, company_name, created_at, status, tender_sent FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC",
+        (message.from_user.id,)
+    )
+    
+    if not questionnaires:
+        await message.answer(
+            "📭 У вас пока нет заполненных анкет.\n\n"
+            "Хотите заполнить анкету для поиска тендеров?",
+            reply_markup=get_user_keyboard()
+        )
+        return
+    
+    response = f"📋 <b>Мои анкеты ({len(questionnaires)}):</b>\n\n"
+    
+    for i, q in enumerate(questionnaires, 1):
+        status_icon = "✅" if q['tender_sent'] else "⏳"
+        status_text = "Тендер отправлен" if q['tender_sent'] else "В обработке"
+        date_str = q['created_at'][:10] if q['created_at'] else "??.??.????"
+        
+        response += f"{i}. <b>#{q['id']} - {q['company_name']}</b>\n"
+        response += f"   📅 {date_str} | {status_icon} {status_text}\n\n"
+    
+    await message.answer(response)
+
 # =========== ОБРАБОТЧИКИ СОБЫТИЙ ===========
 @dp.message(F.text == "👤 Переключиться на меню пользователя")
-async def switch_to_user_menu(message: types.Message):
+async def switch_to_user_menu(message: types.Message, state: FSMContext):
     """Переключение на меню пользователя"""
     if message.from_user.id != config.ADMIN_ID:
         return
+    
+    # Очищаем состояние
+    await state.clear()
     
     await message.answer(
         "👤 <b>Вы переключились в режим пользователя</b>\n\n"
@@ -859,18 +938,61 @@ async def start_online_questionnaire(message: types.Message, state: FSMContext):
         await message.answer("🛠️ Вы находитесь в режиме администратора. Для заполнения анкеты переключитесь в меню пользователя.")
         return
     
+    # Очищаем состояние перед началом заполнения
+    await state.clear()
+    
+    # Проверяем, не заполнял ли пользователь анкету сегодня
+    today = datetime.now().strftime("%Y-%m-%d")
+    existing = await db.fetch_one(
+        "SELECT id FROM questionnaires WHERE user_id = ? AND DATE(created_at) = ?",
+        (message.from_user.id, today)
+    )
+    
+    if existing:
+        await message.answer(
+            "⚠️ <b>Вы уже заполняли анкету сегодня!</b>\n\n"
+            "Мы уже обрабатываем вашу анкету. Новую анкету можно будет заполнить завтра.\n\n"
+            "Если нужно внести изменения, свяжитесь с администратором.",
+            reply_markup=get_user_keyboard()
+        )
+        return
+    
     await message.answer(
-        "📝 <b>Начинаем заполнение анкеты!</b>\n\n"
+        "📝 <b>Начинаем заполнение анкеты онлайн!</b>\n\n"
         "Заполнение займет 5-7 минут. Введите ваше ФИО полностью:",
         reply_markup=get_cancel_keyboard()
     )
     await state.set_state(Questionnaire.waiting_for_name)
 
-@dp.message(F.text == "📥 Скачать анкету")
+@dp.message(F.text == "📥 Скачать анкету в Word")
 async def download_questionnaire(message: types.Message):
-    """Скачать анкету для заполнения"""
-    # Админ тоже может скачать анкету
-    questionnaire_text = """АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ
+    """Скачать анкету для заполнения в Word"""
+    # Проверяем наличие файла анкеты
+    if os.path.exists(config.QUESTIONNAIRE_FILE):
+        try:
+            file = FSInputFile(config.QUESTIONNAIRE_FILE)
+            await message.answer_document(
+                file,
+                caption="📄 <b>Скачайте и заполните анкету в Word</b>\n\n"
+                        "<b>Инструкция по заполнению:</b>\n"
+                        "1. Скачайте файл Anketa.docx\n"
+                        "2. Откройте в Microsoft Word или другом редакторе\n"
+                        "3. Заполните все поля анкеты\n"
+                        "4. Сохраните файл\n"
+                        "5. Отправьте заполненную анкету:\n\n"
+                        "📧 <b>На email:</b> info@tritika.ru\n"
+                        "👨‍💼 <b>Наш менеджер в Telegram:</b> @tritika_manager\n\n"
+                        "<i>После получения анкеты мы свяжемся с вами в течение 1 часа в рабочее время!</i>"
+            )
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки файла анкеты: {e}")
+            await message.answer(
+                "❌ <b>Ошибка при отправке файла анкеты.</b>\n\n"
+                "Пожалуйста, свяжитесь с администратором или используйте онлайн-заполнение."
+            )
+    else:
+        # Если файла нет, создаем текстовую версию
+        questionnaire_text = """АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ
 
 1. ФИО полностью: ___________________
 2. Название компании: ___________________
@@ -885,26 +1007,27 @@ async def download_questionnaire(message: types.Message):
 
 Заполните и отправьте на info@tritika.ru
 Или перешлите менеджеру в Telegram"""
-    
-    file = BufferedInputFile(
-        questionnaire_text.encode('utf-8'),
-        filename="Анкета_для_тендеров.txt"
-    )
-    
-    await message.answer_document(
-        file,
-        caption="📄 <b>Скачайте и заполните анкету</b>\n\n"
-                "Заполните все поля и отправьте на:\n"
-                "📧 <b>info@tritika.ru</b>\n\n"
-                "Или перешлите заполненную анкету менеджеру в Telegram."
-    )
+        
+        file = BufferedInputFile(
+            questionnaire_text.encode('utf-8'),
+            filename="Анкета_для_тендеров.txt"
+        )
+        
+        await message.answer_document(
+            file,
+            caption="📄 <b>Скачайте и заполните анкету</b>\n\n"
+                    "Заполните все поля и отправьте на:\n"
+                    "📧 <b>info@tritika.ru</b>\n"
+                    "👨‍💼 <b>Наш менеджер:</b> @tritika_manager\n\n"
+                    "Или используйте онлайн-заполнение через бота."
+        )
 
 @dp.message(F.text == "❓ Как это работает?")
 async def how_it_works(message: types.Message):
     """Объяснение работы сервиса"""
     await message.answer(
         "🔄 <b>Как работает наш сервис:</b>\n\n"
-        "1. <b>Заполняете анкету</b> - онлайн или скачиваете шаблон\n"
+        "1. <b>Заполняете анкету</b> - онлайн или скачиваете шаблон в Word\n"
         "2. <b>Мы анализируем</b> вашу сферу деятельности и потребности\n"
         "3. <b>Ищем тендеры</b> по 50+ площадкам и базам данных\n"
         "4. <b>Формируем подборку</b> релевантных тендеров\n"
@@ -953,7 +1076,7 @@ async def request_consultation(message: types.Message):
     # Обновляем статистику
     await db.update_statistics('consultation_requests')
 
-@dp.message(F.text == "❌ Отменить")
+@dp.message(F.text == "❌ Отменить заполнение")
 async def cancel_action(message: types.Message, state: FSMContext):
     """Отмена действия"""
     await state.clear()
@@ -961,12 +1084,32 @@ async def cancel_action(message: types.Message, state: FSMContext):
     if message.from_user.id == config.ADMIN_ID:
         await message.answer("❌ Действие отменено.", reply_markup=get_admin_keyboard())
     else:
-        await message.answer("❌ Действие отменено.", reply_markup=get_user_keyboard())
+        await message.answer(
+            "❌ Заполнение анкеты отменено.\n\n"
+            "Вы можете начать заполнение заново в любое время.",
+            reply_markup=get_user_keyboard()
+        )
 
 # =========== ЗАПОЛНЕНИЕ АНКЕТЫ ===========
 @dp.message(Questionnaire.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
     """Обработка ФИО"""
+    # Проверяем, не заполнял ли пользователь анкету сегодня
+    today = datetime.now().strftime("%Y-%m-%d")
+    existing = await db.fetch_one(
+        "SELECT id FROM questionnaires WHERE user_id = ? AND DATE(created_at) = ?",
+        (message.from_user.id, today)
+    )
+    
+    if existing:
+        await message.answer(
+            "⚠️ <b>Вы уже заполняли анкету сегодня!</b>\n\n"
+            "Мы уже обрабатываем вашу анкету. Новую анкету можно будет заполнить завтра.",
+            reply_markup=get_user_keyboard()
+        )
+        await state.clear()
+        return
+    
     await state.update_data(
         full_name=message.text.strip(),
         user_id=message.from_user.id,
@@ -1073,6 +1216,19 @@ async def process_regions(message: types.Message, state: FSMContext):
     user_data = await state.get_data()
     user_data['regions'] = message.text.strip()
     
+    # Проверяем на дубликат перед сохранением
+    is_duplicate = await db.check_duplicate_questionnaire(user_data)
+    
+    if is_duplicate:
+        await message.answer(
+            "⚠️ <b>Такая анкета уже существует!</b>\n\n"
+            "Вы уже заполняли анкету с такими данными. Новая анкета не сохранена.\n\n"
+            "Если нужно внести изменения, свяжитесь с администратором.",
+            reply_markup=get_user_keyboard()
+        )
+        await state.clear()
+        return
+    
     # Сохраняем анкету
     with timing("Сохранение анкеты"):
         questionnaire_id = await db.save_questionnaire(user_data)
@@ -1086,7 +1242,7 @@ async def process_regions(message: types.Message, state: FSMContext):
             time_info = f"⏱️ <b>Запрос получен в нерабочее время</b>\nВышлю подборку {next_time.strftime('%d.%m.%Y')} с 9:00 до 17:00"
         
         await message.answer(
-            f"🎉 <b>Отлично! Анкета сохранена.</b>\n\n"
+            f"🎉 <b>Отлично! Анкета #{questionnaire_id} сохранена.</b>\n\n"
             f"{time_info}\n\n"
             f"📧 <b>Подборку пришлю:</b>\n"
             f"• На email: {user_data['email']}\n"
@@ -1140,6 +1296,7 @@ async def process_regions(message: types.Message, state: FSMContext):
     else:
         await message.answer(
             "❌ <b>Ошибка сохранения анкеты.</b>\n\n"
+            "Возможно, такая анкета уже существует или произошла ошибка.\n"
             "Пожалуйста, попробуйте позже или свяжитесь с поддержкой.",
             reply_markup=get_user_keyboard()
         )
@@ -1310,12 +1467,10 @@ async def write_to_user(callback: types.CallbackQuery):
     
     user_id = int(callback.data.split("_")[1])
     
-    # Здесь можно добавить логику для начала диалога с пользователем
     await callback.message.answer(
         f"💬 <b>Написать пользователю</b>\n\n"
         f"ID пользователя: {user_id}\n\n"
-        f"Чтобы написать пользователю, просто отправьте ему сообщение в личные сообщения.\n"
-        f"Или используйте команду /msg_{user_id} в этом чате."
+        f"Чтобы написать пользователю, просто отправьте ему сообщение в личные сообщения."
     )
     
     await callback.answer()
@@ -1868,6 +2023,9 @@ async def show_settings(message: types.Message):
     db_size = os.path.getsize(config.DB_PATH) if os.path.exists(config.DB_PATH) else 0
     log_size = os.path.getsize(os.path.join(config.LOGS_DIR, 'bot.log')) if os.path.exists(os.path.join(config.LOGS_DIR, 'bot.log')) else 0
     
+    # Проверяем наличие файла анкеты
+    questionnaire_file_exists = os.path.exists(config.QUESTIONNAIRE_FILE)
+    
     settings_text = f"""
 ⚙️ <b>Настройки бота</b>
 
@@ -1881,6 +2039,10 @@ async def show_settings(message: types.Message):
 • Размер: {db_size/1024/1024:.2f} MB
 • Директория бэкапов: {config.BACKUP_DIR}
 
+<b>Файл анкеты:</b>
+• Файл: {config.QUESTIONNAIRE_FILE}
+• Статус: {'✅ Присутствует' if questionnaire_file_exists else '❌ Отсутствует'}
+
 <b>Логи:</b>
 • Директория: {config.LOGS_DIR}
 • Размер логов: {log_size/1024/1024:.2f} MB
@@ -1888,6 +2050,7 @@ async def show_settings(message: types.Message):
 <b>Безопасность:</b>
 • Лимит сообщений: {config.RATE_LIMIT} сек
 • Валидация данных: Включена
+• Проверка дубликатов: Включена
     """
     
     await message.answer(settings_text, reply_markup=keyboard)
@@ -2141,6 +2304,11 @@ async def main():
     # Проверяем наличие необходимых директорий
     os.makedirs(config.BACKUP_DIR, exist_ok=True)
     os.makedirs(config.LOGS_DIR, exist_ok=True)
+    
+    # Проверяем наличие файла анкеты
+    if not os.path.exists(config.QUESTIONNAIRE_FILE):
+        logger.warning(f"⚠️ Файл анкеты '{config.QUESTIONNAIRE_FILE}' не найден!")
+        logger.info("📝 Будет использована текстовая версия анкеты")
     
     # Инициализация базы данных
     logger.info("🔄 Инициализация базы данных...")
