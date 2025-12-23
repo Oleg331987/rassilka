@@ -32,12 +32,13 @@ from aiogram.enums import ParseMode
 import aiosqlite
 import sqlite3
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from concurrent.futures import ThreadPoolExecutor
 
 # =========== HEALTHCHECK SERVER ===========
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Обработчик healthcheck запросов для Railway"""
     def do_GET(self):
-        if self.path == '/':
+        if self.path in ['/', '/health']:
             self.send_response(200)
             self.send_header('Content-type', 'text/plain')
             self.end_headers()
@@ -49,31 +50,6 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         pass  # Отключаем стандартное логирование
 
-def start_healthcheck_server():
-    """Запуск HTTP сервера для healthcheck"""
-    port = int(os.getenv('PORT', 8080))
-    try:
-        server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-        print(f"✅ Healthcheck server started on port {port}")
-        server.serve_forever()
-    except OSError as e:
-        print(f"❌ Healthcheck server error (port {port}): {e}")
-        # Пробуем другой порт
-        try:
-            server = HTTPServer(('0.0.0.0', 8081), HealthCheckHandler)
-            print(f"✅ Healthcheck server started on port 8081")
-            server.serve_forever()
-        except Exception as e2:
-            print(f"❌ Healthcheck server completely failed: {e2}")
-    except Exception as e:
-        print(f"❌ Healthcheck server error: {e}")
-
-def run_healthcheck_in_background():
-    """Запуск healthcheck сервера в фоновом потоке"""
-    thread = threading.Thread(target=start_healthcheck_server, daemon=True)
-    thread.start()
-    print("✅ Healthcheck running in background")
-
 # =========== КОНФИГУРАЦИЯ ===========
 class Config:
     def __init__(self):
@@ -83,7 +59,6 @@ class Config:
         
         if not self.BOT_TOKEN:
             print("❌ BOT_TOKEN не установлен!")
-            # Не завершаем работу сразу, чтобы healthcheck мог работать
             
         if not self.ADMIN_ID:
             print("❌ ADMIN_ID не установлен!")
@@ -149,7 +124,6 @@ def setup_logging():
         print(f"✅ Файловый логгер настроен: {os.path.join(config.LOGS_DIR, 'bot.log')}")
     except Exception as e:
         print(f"⚠️ Не удалось настроить файловый логгер: {e}")
-        # Используем только консольный логгер
     
     logger.addHandler(console_handler)
     
@@ -214,10 +188,8 @@ else:
 # =========== ВАЛИДАЦИЯ ДАННЫХ ===========
 def validate_phone(phone: str) -> bool:
     """Проверка формата телефона"""
-    # Убираем все нецифровые символы, кроме +
     clean_phone = re.sub(r'[^\d+]', '', phone)
     
-    # Проверяем российские форматы
     if clean_phone.startswith('+7') and len(clean_phone) == 12:
         return True
     elif clean_phone.startswith('8') and len(clean_phone) == 11:
@@ -238,14 +210,12 @@ def validate_inn(inn: str) -> bool:
         return False
     
     if len(inn) == 10:
-        # Проверка контрольной цифры для 10-значного ИНН
         coefficients = [2, 4, 10, 3, 5, 9, 4, 6, 8]
         checksum = sum(int(inn[i]) * coefficients[i] for i in range(9)) % 11
         if checksum > 9:
             checksum = checksum % 10
         return checksum == int(inn[9])
     elif len(inn) == 12:
-        # Проверка контрольных цифр для 12-значного ИНН
         coefficients1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8]
         checksum1 = sum(int(inn[i]) * coefficients1[i] for i in range(10)) % 11
         if checksum1 > 9:
@@ -269,7 +239,6 @@ class Database:
         """Инициализация базы данных"""
         try:
             async with aiosqlite.connect(self.db_path) as conn:
-                # Таблица анкет
                 await conn.execute('''
                 CREATE TABLE IF NOT EXISTS questionnaires (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -304,7 +273,6 @@ class Database:
                 )
                 ''')
                 
-                # Таблица рассылок
                 await conn.execute('''
                 CREATE TABLE IF NOT EXISTS mailings (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -319,7 +287,6 @@ class Database:
                 )
                 ''')
                 
-                # Таблица реакций на рассылки
                 await conn.execute('''
                 CREATE TABLE IF NOT EXISTS mailing_responses (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -330,7 +297,6 @@ class Database:
                 )
                 ''')
                 
-                # Таблица статистики
                 await conn.execute('''
                 CREATE TABLE IF NOT EXISTS statistics (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -345,7 +311,6 @@ class Database:
                 )
                 ''')
                 
-                # Индексы
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_user_id ON questionnaires (user_id)')
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_status ON questionnaires (status)')
                 await conn.execute('CREATE INDEX IF NOT EXISTS idx_tender_sent ON questionnaires (tender_sent)')
@@ -425,10 +390,8 @@ class Database:
     async def save_questionnaire(self, user_data: dict) -> Optional[int]:
         """Сохранение анкеты с проверкой на дубликаты"""
         try:
-            # Проверяем на дубликат
             if await self.check_duplicate_questionnaire(user_data):
                 logger.warning(f"⚠️ Попытка сохранения дубликата анкеты для пользователя {user_data['user_id']}")
-                # Получаем ID существующей анкеты
                 existing = await self.fetch_one(
                     "SELECT id FROM questionnaires WHERE user_id = ? AND inn = ? ORDER BY created_at DESC LIMIT 1",
                     (user_data['user_id'], user_data['inn'])
@@ -466,8 +429,6 @@ class Database:
             cursor = await self.execute_query(query, params)
             
             if cursor and cursor.rowcount == 0:
-                # Запись не вставлена из-за дубликата
-                logger.warning(f"⚠️ Дубликат анкеты не сохранен для пользователя {user_data['user_id']}")
                 existing = await self.fetch_one(
                     "SELECT id FROM questionnaires WHERE user_id = ? AND inn = ? ORDER BY created_at DESC LIMIT 1",
                     (user_data['user_id'], user_data['inn'])
@@ -478,7 +439,6 @@ class Database:
             
             questionnaire_id = cursor.lastrowid if cursor else None
             
-            # Обновляем статистику
             if questionnaire_id:
                 await self.update_statistics('questionnaires_completed')
             
@@ -500,7 +460,6 @@ class Database:
         '''
         await self.execute_query(query, (now, admin_id, file_id, now, questionnaire_id))
         
-        # Обновляем статистику
         await self.update_statistics('tenders_sent')
         
         logger.info(f"✅ Тендер отправлен для анкеты #{questionnaire_id}")
@@ -564,7 +523,6 @@ class Database:
         await self.execute_query(query, (now, message_text, message_type, 
                                         total_users, successful, failed))
         
-        # Обновляем статистику
         await self.update_statistics('mailings_sent')
     
     async def save_mailing_response(self, mailing_id: int, user_id: int, response_text: str):
@@ -576,20 +534,17 @@ class Database:
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await self.execute_query(query, (mailing_id, user_id, response_text, now))
         
-        # Обновляем счетчик ответов в анкете
         await self.execute_query(
             "UPDATE questionnaires SET responses_count = responses_count + 1 WHERE user_id = ?",
             (user_id,)
         )
         
-        # Обновляем статистику
         await self.update_statistics('mailing_responses')
     
     async def update_statistics(self, field: str):
         """Обновление статистики"""
         today = datetime.now().strftime("%Y-%m-%d")
         
-        # Проверяем, есть ли запись на сегодня
         existing = await self.fetch_one(
             "SELECT id FROM statistics WHERE date = ?", 
             (today,)
@@ -721,11 +676,9 @@ def is_working_hours():
     """Проверка рабочего времени"""
     now = datetime.now()
     
-    # Проверка дня недели (0-пн, 6-вс)
     if now.weekday() not in config.WORK_DAYS:
         return False
     
-    # Проверка времени
     if not (config.WORK_START_HOUR <= now.hour < config.WORK_END_HOUR):
         return False
     
@@ -735,13 +688,10 @@ def get_next_working_time():
     """Получение следующего рабочего времени"""
     now = datetime.now()
     
-    # Если сейчас рабочий день в рабочее время
     if is_working_hours():
         return now
     
-    # Если сейчас рабочий день, но не рабочее время
     if now.weekday() in config.WORK_DAYS and now.hour >= config.WORK_END_HOUR:
-        # Следующий рабочий день в 9:00
         days_to_add = 1
         while (now.weekday() + days_to_add) % 7 not in config.WORK_DAYS:
             days_to_add += 1
@@ -749,7 +699,6 @@ def get_next_working_time():
         next_day = now + timedelta(days=days_to_add)
         return next_day.replace(hour=config.WORK_START_HOUR, minute=0, second=0, microsecond=0)
     
-    # Если сейчас не рабочий день
     days_to_add = 1
     while (now.weekday() + days_to_add) % 7 not in config.WORK_DAYS:
         days_to_add += 1
@@ -770,7 +719,6 @@ async def send_notification_to_admin(message_text: str):
 async def schedule_follow_up(questionnaire_id: int, user_id: int):
     """Планирование follow-up сообщения с учетом рабочего времени"""
     try:
-        # Получаем информацию о времени отправки тендера
         questionnaire = await db.fetch_one(
             "SELECT tender_sent_at FROM questionnaires WHERE id = ? AND tender_sent = 1",
             (questionnaire_id,)
@@ -788,25 +736,19 @@ async def schedule_follow_up(questionnaire_id: int, user_id: int):
         tender_time = datetime.strptime(tender_time_str, "%Y-%m-%d %H:%M:%S")
         now = datetime.now()
         
-        # Рассчитываем время для follow-up
         if is_working_hours() and tender_time.hour >= config.WORK_START_HOUR:
-            # Если тендер отправлен в рабочее время - ждем 1 час
             wait_seconds = 3600
         else:
-            # Если в нерабочее время - планируем на следующее рабочее время + 1 час
             next_work_time = get_next_working_time()
             if tender_time > next_work_time:
-                # Тендер отправлен позже, чем начало следующего рабочего дня
                 wait_seconds = (tender_time - now).total_seconds() + 3600
             else:
                 wait_seconds = (next_work_time - now).total_seconds() + 3600
         
-        # Ждем нужное количество секунд
         if wait_seconds > 0:
             logger.info(f"⏰ Follow-up для анкеты #{questionnaire_id} запланирован через {wait_seconds/3600:.1f} часов")
             await asyncio.sleep(wait_seconds)
         
-        # Проверяем, не был ли уже отправлен follow-up
         current_status = await db.fetch_one(
             "SELECT follow_up_sent FROM questionnaires WHERE id = ?",
             (questionnaire_id,)
@@ -836,10 +778,8 @@ async def create_backup():
         backup_name = f"backup_{datetime.now().strftime('%Y%m%d_%H%M%S')}.db"
         backup_path = os.path.join(config.BACKUP_DIR, backup_name)
         
-        # Копируем файл базы данных
         shutil.copy2(config.DB_PATH, backup_path)
         
-        # Удаляем старые бэкапы (оставляем последние 7)
         if os.path.exists(config.BACKUP_DIR):
             backups = [f for f in os.listdir(config.BACKUP_DIR) if f.endswith('.db')]
             backups.sort(reverse=True)
@@ -864,7 +804,6 @@ if dp:
         """Глобальная обработка ошибок"""
         logger.error(f"🔥 Критическая ошибка: {exception}", exc_info=True)
         
-        # Уведомляем администратора о критических ошибках
         try:
             await send_notification_to_admin(
                 f"⚠️ <b>КРИТИЧЕСКАЯ ОШИБКА</b>\n\n"
@@ -882,7 +821,6 @@ if dp:
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message, state: FSMContext):
         """Старт бота"""
-        # Очищаем состояние при старте
         await state.clear()
         
         if message.from_user.id == config.ADMIN_ID:
@@ -947,7 +885,6 @@ if dp:
             await message.answer("⛔ У вас нет прав для доступа к панели администратора.")
             return
         
-        # Очищаем состояние
         await state.clear()
         
         await message.answer(
@@ -974,7 +911,6 @@ if dp:
     @dp.message(Command("myan"))
     async def cmd_my_questionnaires(message: types.Message):
         """Показать мои анкеты"""
-        # Получаем анкеты пользователя
         questionnaires = await db.fetch_all(
             "SELECT id, company_name, created_at, status, tender_sent FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC",
             (message.from_user.id,)
@@ -1008,7 +944,6 @@ if dp:
         if message.from_user.id != config.ADMIN_ID:
             return
         
-        # Очищаем состояние
         await state.clear()
         
         await message.answer(
@@ -1021,15 +956,12 @@ if dp:
     @dp.message(F.text == "📝 Заполнить анкету онлайн")
     async def start_online_questionnaire(message: types.Message, state: FSMContext):
         """Начало заполнения анкеты онлайн"""
-        # Админ не должен заполнять анкету
         if message.from_user.id == config.ADMIN_ID:
             await message.answer("🛠️ Вы находитесь в режиме администратора. Для заполнения анкеты переключитесь в меню пользователя.")
             return
         
-        # Очищаем состояние перед началом заполнения
         await state.clear()
         
-        # Проверяем, не заполнял ли пользователь анкету сегодня
         today = datetime.now().strftime("%Y-%m-%d")
         existing = await db.fetch_one(
             "SELECT id FROM questionnaires WHERE user_id = ? AND DATE(created_at) = ?",
@@ -1055,7 +987,6 @@ if dp:
     @dp.message(F.text == "📥 Скачать анкету в Word")
     async def download_questionnaire(message: types.Message):
         """Скачать анкету для заполнения в Word"""
-        # Проверяем наличие файла анкеты
         if os.path.exists(config.QUESTIONNAIRE_FILE):
             try:
                 file = FSInputFile(config.QUESTIONNAIRE_FILE)
@@ -1079,7 +1010,6 @@ if dp:
                     "Пожалуйста, свяжитесь с администратором или используйте онлайн-заполнение."
                 )
         else:
-            # Если файла нет, создаем текстовую версию
             questionnaire_text = """АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ
 
 1. ФИО полностью: ___________________
@@ -1136,7 +1066,6 @@ if dp:
     @dp.message(F.text == "📞 Консультация")
     async def request_consultation(message: types.Message):
         """Запрос консультации"""
-        # Админ не должен запрашивать консультацию
         if message.from_user.id == config.ADMIN_ID:
             await message.answer("🛠️ Вы администратор. Эта функция предназначена для пользователей.")
             return
@@ -1152,7 +1081,6 @@ if dp:
             "⏱️ <b>Ожидайте звонка или сообщения.</b>"
         )
         
-        # Уведомляем администратора
         await send_notification_to_admin(
             f"📞 <b>ЗАПРОС НА КОНСУЛЬТАЦИЮ</b>\n\n"
             f"👤 Пользователь: @{message.from_user.username or message.from_user.id}\n"
@@ -1161,7 +1089,6 @@ if dp:
             f"✉️ Сообщение: Пользователь запросил консультацию через меню"
         )
         
-        # Обновляем статистику
         await db.update_statistics('consultation_requests')
 
     @dp.message(F.text == "❌ Отменить заполнение")
@@ -1183,7 +1110,6 @@ if dp:
     @dp.message(Questionnaire.waiting_for_name)
     async def process_name(message: types.Message, state: FSMContext):
         """Обработка ФИО"""
-        # Проверяем, не заполнял ли пользователь анкету сегодня
         today = datetime.now().strftime("%Y-%m-%d")
         existing = await db.fetch_one(
             "SELECT id FROM questionnaires WHERE user_id = ? AND DATE(created_at) = ?",
@@ -1305,7 +1231,6 @@ if dp:
         user_data = await state.get_data()
         user_data['regions'] = message.text.strip()
         
-        # Проверяем на дубликат перед сохранением
         is_duplicate = await db.check_duplicate_questionnaire(user_data)
         
         if is_duplicate:
@@ -1318,12 +1243,10 @@ if dp:
             await state.clear()
             return
         
-        # Сохраняем анкету
         with timing("Сохранение анкеты"):
             questionnaire_id = await db.save_questionnaire(user_data)
         
         if questionnaire_id:
-            # Определяем время отправки
             if is_working_hours():
                 time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Подождите не более часа</b>"
             else:
@@ -1338,14 +1261,13 @@ if dp:
                 f"• В этот чат Telegram\n\n"
                 f"📊 <b>Что будет в подборке:</b>\n"
                 f"• Релевантные тендеры по вашим параметрам\n"
-                f"• Сроки подачи заявок\n"
+                f"• Сроки подачи заявки\n"
                 f"• Контакты организаторов\n"
                 f"• Рекомендации по участию\n\n"
                 f"<i>Следите за сообщениями!</i>",
                 reply_markup=get_user_keyboard()
             )
             
-            # Уведомляем администратора
             notification = f"""
 🆕 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
 
@@ -1362,7 +1284,6 @@ if dp:
 {'✅ В рабочее время' if is_working_hours() else '⏰ В нерабочее время'}
             """
             
-            # Создаем inline-клавиатуру для быстрой отправки тендера
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -1381,7 +1302,6 @@ if dp:
             if bot:
                 await bot.send_message(config.ADMIN_ID, notification, reply_markup=keyboard)
             
-            # Запускаем задачу для follow-up
             asyncio.create_task(schedule_follow_up(questionnaire_id, user_data['user_id']))
         else:
             await message.answer(
@@ -1399,7 +1319,6 @@ if dp:
     async def handle_positive_response(message: types.Message):
         """Обработка положительного ответа"""
         with timing("Обработка положительного ответа"):
-            # Получаем анкету пользователя
             questionnaire = await db.fetch_one(
                 "SELECT id FROM questionnaires WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
                 (message.from_user.id,)
@@ -1421,7 +1340,6 @@ if dp:
                     reply_markup=get_user_keyboard()
                 )
                 
-                # Уведомляем администратора
                 await send_notification_to_admin(
                     f"✅ <b>Пользователь нашел подходящие тендеры</b>\n\n"
                     f"👤 @{message.from_user.username or message.from_user.id}\n"
@@ -1451,7 +1369,6 @@ if dp:
                 reply_markup=get_user_keyboard()
             )
             
-            # Добавляем в группу для рассылки
             await db.execute_query(
                 "UPDATE questionnaires SET mailing_group = 1 WHERE user_id = ?",
                 (message.from_user.id,)
@@ -1495,7 +1412,6 @@ if dp:
         user_data = await state.get_data()
         questionnaire_id = user_data['questionnaire_id']
         
-        # Получаем данные анкеты
         questionnaire = await db.fetch_one(
             "SELECT user_id, email, full_name, company_name FROM questionnaires WHERE id = ?",
             (questionnaire_id,)
@@ -1511,7 +1427,6 @@ if dp:
         file_size = message.document.file_size or 0
         
         try:
-            # Отправляем файл пользователю
             if bot:
                 await bot.send_document(
                     questionnaire['user_id'],
@@ -1528,7 +1443,6 @@ if dp:
                             f"<i>Через некоторое время мы спросим, удалось ли найти подходящее.</i>"
                 )
             
-            # Отмечаем отправку в базе
             await db.mark_tender_sent(questionnaire_id, message.from_user.id, file_id)
             
             await message.answer(
@@ -1542,7 +1456,6 @@ if dp:
                 reply_markup=get_admin_keyboard()
             )
             
-            # Запускаем follow-up
             asyncio.create_task(schedule_follow_up(questionnaire_id, questionnaire['user_id']))
             
         except Exception as e:
@@ -1622,7 +1535,7 @@ MAILING_TEMPLATES = [
         "subject": "Нововведения в законодательстве о госзакупках",
         "text": """Здравствуйте!
 
-С 1 января вступили в силу новые правила участия в госзакупках.
+С 1 января вступили в силу новые правила участии в госзакупках.
 
 Основные изменения:
 • Упрощение процедуры для малого бизнеса
@@ -1690,7 +1603,6 @@ if dp:
         
         template = MAILING_TEMPLATES[template_index]
         
-        # Получаем пользователей для рассылки (те, кто не отписался)
         users = await db.fetch_all(
             "SELECT DISTINCT user_id, username FROM questionnaires WHERE unsubscribe = 0 AND user_id IS NOT NULL"
         )
@@ -1715,7 +1627,6 @@ if dp:
                     )
                 success_count += 1
                 
-                # Небольшая задержка для избежания лимитов
                 if success_count % 10 == 0:
                     await asyncio.sleep(0.5)
                     
@@ -1723,7 +1634,6 @@ if dp:
                 logger.error(f"Ошибка отправки рассылки пользователю {user['user_id']}: {e}")
                 fail_count += 1
         
-        # Сохраняем результаты
         await db.save_mailing(
             template['text'],
             f"template_{template_index}",
@@ -1732,7 +1642,6 @@ if dp:
             fail_count
         )
         
-        # Обновляем дату последней рассылки для пользователей
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         await db.execute_query(
             "UPDATE questionnaires SET last_mailing_date = ? WHERE unsubscribe = 0",
@@ -1756,7 +1665,6 @@ if dp:
             await callback.answer("⛔ У вас нет прав для этого действия")
             return
         
-        # Получаем статистику последних 10 рассылок
         mailings = await db.fetch_all(
             "SELECT * FROM mailings ORDER BY mailing_date DESC LIMIT 10"
         )
@@ -1816,7 +1724,6 @@ if dp:
         
         mailing_text = message.text
         
-        # Получаем пользователей для рассылки
         users = await db.fetch_all(
             "SELECT DISTINCT user_id, username FROM questionnaires WHERE unsubscribe = 0 AND user_id IS NOT NULL"
         )
@@ -1847,7 +1754,6 @@ if dp:
                 logger.error(f"Ошибка отправки своей рассылки пользователю {user['user_id']}: {e}")
                 fail_count += 1
         
-        # Сохраняем результаты
         await db.save_mailing(
             mailing_text,
             "custom",
@@ -1867,20 +1773,15 @@ if dp:
         
         await state.clear()
 
-    # Обработка ответов на рассылки
     @dp.message()
     async def handle_all_messages(message: types.Message):
         """Обработка всех сообщений (включая ответы на рассылки)"""
-        # Пропускаем команды
         if message.text and message.text.startswith('/'):
             return
         
-        # Пропускаем сообщения от админа
         if message.from_user.id == config.ADMIN_ID:
             return
         
-        # Проверяем, не является ли это ответом на рассылку
-        # Ищем последнюю рассылку (за последние 7 дней)
         seven_days_ago = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
         
         last_mailing = await db.fetch_one(
@@ -1889,14 +1790,12 @@ if dp:
         )
         
         if last_mailing:
-            # Сохраняем ответ
             await db.save_mailing_response(
                 last_mailing['id'],
                 message.from_user.id,
                 message.text
             )
             
-            # Передаем ответ администратору
             await send_notification_to_admin(
                 f"📨 <b>ОТВЕТ НА РАССЫЛКУ</b>\n\n"
                 f"👤 Пользователь: @{message.from_user.username or 'без username'}\n"
@@ -1914,18 +1813,15 @@ if dp:
             await message.answer("⛔ У вас нет прав для этого действия")
             return
         
-        # Получаем отчет за 14 дней
         report = await db.get_statistics_report(14)
         new_users = await db.get_new_users_count(14)
         
-        # Получаем данные за сегодня
         today = datetime.now().strftime("%Y-%m-%d")
         today_stats = await db.fetch_one(
             "SELECT * FROM statistics WHERE date = ?",
             (today,)
         )
         
-        # Получаем общее количество анкет
         total_questionnaires = await db.fetch_one(
             "SELECT COUNT(*) as count FROM questionnaires"
         )
@@ -1961,7 +1857,6 @@ if dp:
 • Ответ → Консультация: {(consultations/follow_ups*100 if follow_ups > 0 else 0):.1f}%
 """
             
-            # Добавляем статистику за сегодня
             if today_stats:
                 response += f"\n📅 <b>Сегодня ({today}):</b>\n"
                 if today_stats['new_users']:
@@ -1986,7 +1881,6 @@ if dp:
             await message.answer("⛔ У вас нет прав для этого действия")
             return
         
-        # Анкеты, где тендер еще не отправлен
         questionnaires = await db.fetch_all(
             "SELECT * FROM questionnaires WHERE tender_sent = 0 ORDER BY created_at DESC LIMIT 10"
         )
@@ -2006,7 +1900,6 @@ if dp:
             response += f"🎯 {q['activity_sphere'][:30]}...\n"
             response += f"⏰ {created_time}\n"
             
-            # Кнопки действий
             keyboard = InlineKeyboardMarkup(
                 inline_keyboard=[
                     [
@@ -2024,9 +1917,8 @@ if dp:
             
             if i == 1:
                 await message.answer(response, reply_markup=keyboard)
-                response = ""  # Сбрасываем для следующего сообщения
+                response = ""
             else:
-                # Для остальных анкет отправляем отдельными сообщениями
                 await message.answer(response, reply_markup=keyboard)
                 response = ""
         
@@ -2043,7 +1935,6 @@ if dp:
             return
         
         try:
-            # Экспорт анкет
             questionnaires = await db.fetch_all(
                 "SELECT * FROM questionnaires ORDER BY created_at DESC"
             )
@@ -2052,7 +1943,6 @@ if dp:
                 output = StringIO()
                 writer = csv.writer(output, delimiter=';', quotechar='"', quoting=csv.QUOTE_MINIMAL)
                 
-                # Заголовки
                 writer.writerow([
                     'ID', 'User ID', 'Username', 'ФИО', 'Компания', 'ИНН',
                     'Контактное лицо', 'Телефон', 'Email', 'Сфера деятельности',
@@ -2061,7 +1951,6 @@ if dp:
                     'Запрос консультации', 'Отписан', 'Дата создания'
                 ])
                 
-                # Данные
                 for q in questionnaires:
                     writer.writerow([
                         q['id'], q['user_id'], q['username'] or '', q['full_name'] or '',
@@ -2076,7 +1965,7 @@ if dp:
                     ])
                 
                 file = BufferedInputFile(
-                    output.getvalue().encode('utf-8-sig'),  # utf-8-sig для Excel
+                    output.getvalue().encode('utf-8-sig'),
                     filename=f"tenders_export_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
                 )
                 
@@ -2119,11 +2008,9 @@ if dp:
             ]
         )
         
-        # Получаем статистику базы
         db_size = os.path.getsize(config.DB_PATH) if os.path.exists(config.DB_PATH) else 0
         log_size = os.path.getsize(os.path.join(config.LOGS_DIR, 'bot.log')) if os.path.exists(os.path.join(config.LOGS_DIR, 'bot.log')) else 0
         
-        # Проверяем наличие файла анкеты
         questionnaire_file_exists = os.path.exists(config.QUESTIONNAIRE_FILE)
         
         settings_text = f"""
@@ -2187,14 +2074,12 @@ if dp:
             return
         
         try:
-            # Получаем различные статистики
             total_questionnaires = await db.fetch_one("SELECT COUNT(*) as count FROM questionnaires")
             total_mailings = await db.fetch_one("SELECT COUNT(*) as count FROM mailings")
             total_users = await db.fetch_one("SELECT COUNT(DISTINCT user_id) as count FROM questionnaires")
             active_users = await db.fetch_one("SELECT COUNT(DISTINCT user_id) as count FROM questionnaires WHERE unsubscribe = 0")
             tenders_sent = await db.fetch_one("SELECT COUNT(*) as count FROM questionnaires WHERE tender_sent = 1")
             
-            # Последняя активность
             last_questionnaire = await db.fetch_one("SELECT created_at FROM questionnaires ORDER BY created_at DESC LIMIT 1")
             last_mailing = await db.fetch_one("SELECT mailing_date FROM mailings ORDER BY mailing_date DESC LIMIT 1")
             
@@ -2218,7 +2103,6 @@ if dp:
 <b>Размеры таблиц:</b>
 """
             
-            # Получаем размеры таблиц
             tables = await db.fetch_all("SELECT name FROM sqlite_master WHERE type='table'")
             
             for table in tables:
@@ -2240,7 +2124,6 @@ if dp:
             await callback.answer("⛔ У вас нет прав для этого действия")
             return
         
-        # Очищаем LRU кэш
         db.get_user_profile.cache_clear()
         
         await callback.message.answer("✅ Кэш успешно очищен")
@@ -2261,7 +2144,6 @@ if dp:
             return
         
         try:
-            # Читаем последние 50 строк логов
             with open(log_file, 'r', encoding='utf-8') as f:
                 lines = f.readlines()
             
@@ -2299,17 +2181,14 @@ async def scheduled_mailings():
         try:
             now = datetime.now()
             
-            # Проверяем, нужно ли отправлять рассылку (вторник и четверг в 11:00)
             if now.weekday() in [1, 3] and now.hour == 11 and now.minute == 0:
                 logger.info("🔄 Начинаю автоматическую рассылку...")
                 
-                # Получаем пользователей для рассылки (кто не отписался)
                 users = await db.fetch_all(
                     "SELECT DISTINCT user_id, username FROM questionnaires WHERE unsubscribe = 0 AND user_id IS NOT NULL"
                 )
                 
                 if users and bot:
-                    # Выбираем случайный шаблон
                     template = random.choice(MAILING_TEMPLATES)
                     
                     success_count = 0
@@ -2327,7 +2206,6 @@ async def scheduled_mailings():
                             logger.error(f"Ошибка автоматической рассылки: {e}")
                             fail_count += 1
                     
-                    # Сохраняем результаты
                     await db.save_mailing(
                         template['text'],
                         "auto_scheduled",
@@ -2338,7 +2216,6 @@ async def scheduled_mailings():
                     
                     logger.info(f"✅ Автоматическая рассылка завершена: {success_count}/{len(users)}")
                     
-                    # Уведомляем администратора
                     await send_notification_to_admin(
                         f"🤖 <b>АВТОМАТИЧЕСКАЯ РАССЫЛКА</b>\n\n"
                         f"📢 Тема: {template['subject']}\n"
@@ -2350,7 +2227,6 @@ async def scheduled_mailings():
                 else:
                     logger.info("ℹ️ Нет пользователей для автоматической рассылки")
             
-            # Ждем 1 минуту перед следующей проверкой
             await asyncio.sleep(60)
             
         except Exception as e:
@@ -2362,7 +2238,6 @@ async def check_pending_follow_ups():
     """Проверка pending follow-up сообщений"""
     while True:
         try:
-            # Получаем анкеты, для которых нужно отправить follow-up
             pending_follow_ups = await db.get_pending_follow_ups()
             
             for questionnaire in pending_follow_ups:
@@ -2373,12 +2248,9 @@ async def check_pending_follow_ups():
                 tender_time = datetime.strptime(tender_sent_at, "%Y-%m-%d %H:%M:%S")
                 now = datetime.now()
                 
-                # Проверяем, прошло ли достаточно времени с момента отправки тендера
                 time_diff = (now - tender_time).total_seconds()
                 
-                # Если прошло более 1 часа и это рабочее время
                 if time_diff > 3600 and is_working_hours():
-                    # Проверяем, не был ли уже отправлен follow-up
                     if not questionnaire['follow_up_sent'] and bot:
                         await bot.send_message(
                             questionnaire['user_id'],
@@ -2389,7 +2261,6 @@ async def check_pending_follow_ups():
                         await db.update_follow_up(questionnaire['id'])
                         logger.info(f"✅ Автоматический follow-up отправлен для анкеты #{questionnaire['id']}")
             
-            # Проверяем каждые 5 минут
             await asyncio.sleep(300)
             
         except Exception as e:
@@ -2401,10 +2272,26 @@ async def main():
     """Основная функция запуска бота"""
     print("🚀 Запуск бота Тритики...")
     
-    # Запускаем healthcheck сервер в фоне
-    run_healthcheck_in_background()
+    # 1. Запускаем healthcheck сервер в отдельном потоке
+    def run_healthcheck():
+        port = int(os.getenv('PORT', 8080))
+        try:
+            server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
+            print(f"✅ Healthcheck server started on port {port}")
+            server.serve_forever()
+        except Exception as e:
+            print(f"❌ Healthcheck server error: {e}")
+            os._exit(1)
     
-    # Инициализация базы данных
+    # Используем ThreadPoolExecutor для запуска в фоне
+    loop = asyncio.get_event_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.run_in_executor(executor, run_healthcheck)
+    
+    # Даем время healthcheck серверу запуститься
+    await asyncio.sleep(1)
+    
+    # 2. Инициализация базы данных
     print("🔄 Инициализация базы данных...")
     db_init_success = False
     try:
@@ -2416,26 +2303,27 @@ async def main():
     if not db_init_success:
         print("⚠️ Продолжаем без базы данных...")
     
-    # Проверяем наличие файла анкеты
+    # 3. Проверяем наличие файла анкеты
     if not os.path.exists(config.QUESTIONNAIRE_FILE):
         print(f"⚠️ Файл анкеты '{config.QUESTIONNAIRE_FILE}' не найден!")
         print("📝 Будет использована текстовая версия анкеты")
     
-    # Проверяем наличие токена бота
+    # 4. Проверяем наличие токена бота
     if not config.BOT_TOKEN:
         print("❌ BOT_TOKEN не установлен. Бот не будет работать.")
         print("⚠️ Healthcheck сервер продолжает работать для проверки Railway")
         # Бесконечный цикл для поддержания работы контейнера
         while True:
             await asyncio.sleep(3600)
+        return
     
-    # Запускаем планировщики в фоне
+    # 5. Запускаем планировщики в фоне
     print("🔄 Запуск фоновых задач...")
     if config.BOT_TOKEN:
         asyncio.create_task(scheduled_mailings())
         asyncio.create_task(check_pending_follow_ups())
     
-    # Запуск бота
+    # 6. Запуск бота
     if bot and dp:
         print("🤖 Запуск polling...")
         try:
@@ -2453,12 +2341,10 @@ async def main():
             print("👋 Бот завершил работу")
     else:
         print("⚠️ Бот не инициализирован. Ожидание healthcheck запросов...")
-        # Бесконечный цикл для поддержания работы контейнера
         while True:
             await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    # Запускаем asyncio loop
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
