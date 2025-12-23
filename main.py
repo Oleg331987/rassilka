@@ -38,11 +38,21 @@ from concurrent.futures import ThreadPoolExecutor
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Обработчик healthcheck запросов для Railway"""
     def do_GET(self):
-        if self.path in ['/', '/health']:
+        if self.path in ['/', '/health', '/status']:
             self.send_response(200)
-            self.send_header('Content-type', 'text/plain')
+            self.send_header('Content-type', 'application/json')
             self.end_headers()
-            self.wfile.write(b'OK')
+            
+            status = {
+                "status": "ok",
+                "bot_initialized": bool(bot),
+                "bot_token_set": bool(config.BOT_TOKEN),
+                "admin_id_set": bool(config.ADMIN_ID),
+                "timestamp": datetime.now().isoformat(),
+                "port": int(os.getenv('PORT', 8080))
+            }
+            
+            self.wfile.write(json.dumps(status).encode())
         else:
             self.send_response(404)
             self.end_headers()
@@ -98,8 +108,13 @@ config = Config()
 # =========== ЛОГИРОВАНИЕ ===========
 def setup_logging():
     """Настройка логирования с ротацией"""
+    # Включаем подробное логирование для отладки
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
+    
     logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
     
     # Форматтер
     formatter = logging.Formatter(
@@ -128,7 +143,7 @@ def setup_logging():
     logger.addHandler(console_handler)
     
     # Логирование для aiogram
-    logging.getLogger('aiogram').setLevel(logging.WARNING)
+    logging.getLogger('aiogram').setLevel(logging.INFO)
     
     return logger
 
@@ -171,19 +186,26 @@ class ThrottlingMiddleware(BaseMiddleware):
 
 # =========== ИНИЦИАЛИЗАЦИЯ БОТА ===========
 if config.BOT_TOKEN:
-    bot = Bot(
-        token=config.BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
-    )
-    storage = MemoryStorage()
-    dp = Dispatcher(storage=storage)
-    
-    # Добавляем middleware
-    dp.message.middleware(ThrottlingMiddleware(config.RATE_LIMIT))
+    try:
+        bot = Bot(
+            token=config.BOT_TOKEN,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+        )
+        storage = MemoryStorage()
+        dp = Dispatcher(storage=storage)
+        
+        # Добавляем middleware
+        dp.message.middleware(ThrottlingMiddleware(config.RATE_LIMIT))
+        
+        logger.info("✅ Бот и диспетчер инициализированы")
+    except Exception as e:
+        logger.error(f"❌ Ошибка инициализации бота: {e}")
+        bot = None
+        dp = None
 else:
     bot = None
     dp = None
-    print("⚠️ Бот не инициализирован - отсутствует BOT_TOKEN")
+    logger.warning("⚠️ Бот не инициализирован - отсутствует BOT_TOKEN")
 
 # =========== ВАЛИДАЦИЯ ДАННЫХ ===========
 def validate_phone(phone: str) -> bool:
@@ -821,6 +843,8 @@ if dp:
     @dp.message(Command("start"))
     async def cmd_start(message: types.Message, state: FSMContext):
         """Старт бота"""
+        logger.info(f"👤 Пользователь {message.from_user.id} (@{message.from_user.username}) нажал /start")
+        
         await state.clear()
         
         if message.from_user.id == config.ADMIN_ID:
@@ -835,6 +859,7 @@ if dp:
                 "• ⚙️ Настраивать параметры бота",
                 reply_markup=get_admin_keyboard()
             )
+            logger.info(f"🛠️ Админ {message.from_user.id} вошел в панель администратора")
         else:
             await message.answer(
                 "🤖 <b>Привет! Я бот Тритики.</b>\n\n"
@@ -851,6 +876,7 @@ if dp:
                 "<i>Бесплатная выгрузка — наш подарок новым клиентам!</i>",
                 reply_markup=get_user_keyboard()
             )
+            logger.info(f"👤 Новый пользователь {message.from_user.id} начал работу с ботом")
 
     @dp.message(Command("help"))
     async def cmd_help(message: types.Message):
@@ -1535,7 +1561,7 @@ MAILING_TEMPLATES = [
         "subject": "Нововведения в законодательстве о госзакупках",
         "text": """Здравствуйте!
 
-С 1 января вступили в силу новые правила участии в госзакупках.
+С 1 января вступили в силу новые правила участия в госзакупках.
 
 Основные изменения:
 • Упрощение процедуры для малого бизнеса
@@ -2289,60 +2315,71 @@ async def main():
     loop.run_in_executor(executor, run_healthcheck)
     
     # Даем время healthcheck серверу запуститься
-    await asyncio.sleep(1)
+    await asyncio.sleep(2)
     
-    # 2. Инициализация базы данных
-    print("🔄 Инициализация базы данных...")
-    db_init_success = False
-    try:
-        with timing("Инициализация БД"):
-            db_init_success = await db.init_db()
-    except Exception as e:
-        print(f"❌ Ошибка инициализации базы данных: {e}")
-    
-    if not db_init_success:
-        print("⚠️ Продолжаем без базы данных...")
-    
-    # 3. Проверяем наличие файла анкеты
-    if not os.path.exists(config.QUESTIONNAIRE_FILE):
-        print(f"⚠️ Файл анкеты '{config.QUESTIONNAIRE_FILE}' не найден!")
-        print("📝 Будет использована текстовая версия анкеты")
-    
-    # 4. Проверяем наличие токена бота
+    # 2. Проверяем наличие токена
     if not config.BOT_TOKEN:
-        print("❌ BOT_TOKEN не установлен. Бот не будет работать.")
-        print("⚠️ Healthcheck сервер продолжает работать для проверки Railway")
-        # Бесконечный цикл для поддержания работы контейнера
+        print("❌ BOT_TOKEN не установлен!")
+        print("⚠️ Healthcheck работает, но бот не будет функционировать")
         while True:
             await asyncio.sleep(3600)
         return
     
-    # 5. Запускаем планировщики в фоне
+    # 3. Проверяем авторизацию бота
+    try:
+        print("🔄 Проверяю авторизацию бота...")
+        bot_info = await bot.get_me()
+        print(f"✅ Бот авторизован как: @{bot_info.username} (ID: {bot_info.id})")
+    except Exception as e:
+        print(f"❌ Ошибка авторизации бота: {e}")
+        print("⚠️ Проверьте BOT_TOKEN в настройках Railway")
+        while True:
+            await asyncio.sleep(3600)
+        return
+    
+    # 4. Инициализация базы данных
+    print("🔄 Инициализация базы данных...")
+    try:
+        with timing("Инициализация БД"):
+            await db.init_db()
+        print("✅ База данных инициализирована")
+    except Exception as e:
+        print(f"❌ Ошибка инициализации базы данных: {e}")
+        print("⚠️ Продолжаем без базы данных...")
+    
+    # 5. Проверяем наличие файла анкеты
+    if not os.path.exists(config.QUESTIONNAIRE_FILE):
+        print(f"⚠️ Файл анкеты '{config.QUESTIONNAIRE_FILE}' не найден!")
+        print("📝 Будет использована текстовая версия анкеты")
+    
+    # 6. Запускаем планировщики в фоне
     print("🔄 Запуск фоновых задач...")
     if config.BOT_TOKEN:
         asyncio.create_task(scheduled_mailings())
         asyncio.create_task(check_pending_follow_ups())
     
-    # 6. Запуск бота
-    if bot and dp:
-        print("🤖 Запуск polling...")
-        try:
-            await dp.start_polling(bot, skip_updates=True)
-        except KeyboardInterrupt:
-            print("⏹️ Бот остановлен пользователем")
-        except Exception as e:
-            print(f"❌ Критическая ошибка при запуске бота: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
-        finally:
-            if bot:
-                await bot.session.close()
-            print("👋 Бот завершил работу")
-    else:
-        print("⚠️ Бот не инициализирован. Ожидание healthcheck запросов...")
-        while True:
-            await asyncio.sleep(3600)
+    # 7. Запуск бота с подробным логированием
+    print("🤖 Запуск polling...")
+    print(f"📊 Информация о боте:")
+    print(f"   - Username: @{bot_info.username}")
+    print(f"   - ID: {bot_info.id}")
+    print(f"   - Админ ID: {config.ADMIN_ID}")
+    print("⏳ Ожидаю обновления от Telegram...")
+    
+    try:
+        await dp.start_polling(bot, skip_updates=True, 
+                              allowed_updates=dp.resolve_used_update_types())
+    except KeyboardInterrupt:
+        print("⏹️ Бот остановлен пользователем")
+    except Exception as e:
+        print(f"❌ Критическая ошибка при запуске бота: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
+    finally:
+        if bot:
+            await bot.session.close()
+        print("👋 Бот завершил работу")
 
 if __name__ == "__main__":
     try:
