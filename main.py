@@ -117,35 +117,25 @@ class ThrottlingMiddleware(BaseMiddleware):
         event,
         data
     ):
-        user_id = event.from_user.id
-        current_time = datetime.now().timestamp()
-        
         # Пропускаем команды админа
-        if user_id == config.ADMIN_ID:
+        if hasattr(event, 'from_user') and event.from_user.id == config.ADMIN_ID:
             return await handler(event, data)
+        
+        user_id = getattr(event.from_user, 'id', None)
+        if not user_id:
+            return await handler(event, data)
+            
+        current_time = datetime.now().timestamp()
         
         # Проверяем время последнего сообщения
         if user_id in self.users:
             last_time = self.users[user_id]
             if current_time - last_time < self.rate_limit:
-                await event.answer("⏳ Пожалуйста, подождите немного перед отправкой следующего сообщения.")
+                if hasattr(event, 'answer'):
+                    await event.answer("⏳ Пожалуйста, подождите немного перед отправкой следующего сообщения.")
                 return
         
         self.users[user_id] = current_time
-        return await handler(event, data)
-
-class AdminMiddleware(BaseMiddleware):
-    """Middleware для проверки прав администратора"""
-    async def __call__(self, handler, event, data):
-        # Для команд админа проверяем права
-        if hasattr(event, 'text') and event.text in [
-            "📊 Новые анкеты", "📤 Отправить тендер", "📈 Отчет эффективности",
-            "📣 Начать рассылку", "📋 Скачать базу", "⚙️ Настройки", "/admin"
-        ]:
-            if event.from_user.id != config.ADMIN_ID:
-                await event.answer("⛔ У вас нет прав для выполнения этой команды.")
-                return
-        
         return await handler(event, data)
 
 # =========== ИНИЦИАЛИЗАЦИЯ БОТА ===========
@@ -158,7 +148,6 @@ dp = Dispatcher(storage=storage)
 
 # Добавляем middleware
 dp.message.middleware(ThrottlingMiddleware(config.RATE_LIMIT))
-dp.message.middleware(AdminMiddleware())
 
 # =========== ВАЛИДАЦИЯ ДАННЫХ ===========
 def validate_phone(phone: str) -> bool:
@@ -542,14 +531,27 @@ class Database:
 db = Database(config.DB_PATH)
 
 # =========== КЛАВИАТУРЫ ===========
-def get_start_keyboard():
-    """Клавиатура при старте"""
+def get_user_keyboard():
+    """Клавиатура пользователя"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Заполнить анкету онлайн")],
             [KeyboardButton(text="📥 Скачать анкету")],
             [KeyboardButton(text="❓ Как это работает?")],
             [KeyboardButton(text="📞 Консультация"), KeyboardButton(text="ℹ️ Помощь")]
+        ],
+        resize_keyboard=True,
+        input_field_placeholder="Выберите действие..."
+    )
+
+def get_admin_keyboard():
+    """Клавиатура администратора"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📊 Новые анкеты"), KeyboardButton(text="📤 Отправить тендер")],
+            [KeyboardButton(text="📈 Отчет эффективности"), KeyboardButton(text="📣 Начать рассылку")],
+            [KeyboardButton(text="📋 Скачать базу"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="👤 Переключиться на меню пользователя")]
         ],
         resize_keyboard=True,
         input_field_placeholder="Выберите действие..."
@@ -573,30 +575,6 @@ def get_yes_no_keyboard():
         resize_keyboard=True
     )
 
-def get_admin_keyboard():
-    """Клавиатура администратора"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📊 Новые анкеты"), KeyboardButton(text="📤 Отправить тендер")],
-            [KeyboardButton(text="📈 Отчет эффективности"), KeyboardButton(text="📣 Начать рассылку")],
-            [KeyboardButton(text="📋 Скачать базу"), KeyboardButton(text="⚙️ Настройки")],
-            [KeyboardButton(text="👤 В меню пользователя")]
-        ],
-        resize_keyboard=True,
-        input_field_placeholder="Выберите действие..."
-    )
-
-def get_user_menu_keyboard():
-    """Клавиатура меню пользователя"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="📝 Заполнить анкету онлайн")],
-            [KeyboardButton(text="📊 Мои анкеты"), KeyboardButton(text="📞 Консультация")],
-            [KeyboardButton(text="❓ Помощь"), KeyboardButton(text="🚫 Отписаться")]
-        ],
-        resize_keyboard=True
-    )
-
 # =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
     waiting_for_name = State()
@@ -614,7 +592,6 @@ class AdminAction(StatesGroup):
     waiting_for_questionnaire_id = State()
     waiting_for_tender_file = State()
     waiting_for_mailing_text = State()
-    waiting_for_settings = State()
 
 # =========== ПОМОЩНИКИ ===========
 @contextmanager
@@ -780,19 +757,32 @@ async def global_error_handler(event, exception):
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     """Старт бота"""
-    await message.answer(
-        "🤖 <b>Привет! Я бот Тритики.</b>\n\n"
-        "Помогаю компаниям находить выгодные тендеры.\n\n"
-        "🎯 <b>Хотите бесплатно получить подборку тендеров по вашей сфере?</b>\n"
-        "Заполните анкету - это займет всего 5 минут!\n\n"
-        "⏱️ <b>Что будет дальше:</b>\n"
-        "1. Вы заполняете анкету онлайн\n"
-        "2. Мы ищем для вас актуальные тендеры\n"
-        "3. Присылаем подборку на почту и в Telegram\n"
-        "4. Помогаем с подготовкой заявки\n\n"
-        "<i>Бесплатная выгрузка — наш подарок новым клиентам!</i>",
-        reply_markup=get_start_keyboard()
-    )
+    if message.from_user.id == config.ADMIN_ID:
+        await message.answer(
+            "🛠️ <b>Добро пожаловать в панель администратора!</b>\n\n"
+            "Здесь вы можете управлять всеми функциями бота:\n"
+            "• 📊 Просматривать новые анкеты\n"
+            "• 📤 Отправлять тендеры пользователям\n"
+            "• 📈 Смотреть отчеты эффективности\n"
+            "• 📣 Настраивать и запускать рассылки\n"
+            "• 📋 Экспортировать данные\n"
+            "• ⚙️ Настраивать параметры бота",
+            reply_markup=get_admin_keyboard()
+        )
+    else:
+        await message.answer(
+            "🤖 <b>Привет! Я бот Тритики.</b>\n\n"
+            "Помогаю компаниям находить выгодные тендеры.\n\n"
+            "🎯 <b>Хотите бесплатно получить подборку тендеров по вашей сфере?</b>\n"
+            "Заполните анкету - это займет всего 5 минут!\n\n"
+            "⏱️ <b>Что будет дальше:</b>\n"
+            "1. Вы заполняете анкету онлайн\n"
+            "2. Мы ищем для вас актуальные тендеры\n"
+            "3. Присылаем подборку на почту и в Telegram\n"
+            "4. Помогаем с подготовкой заявки\n\n"
+            "<i>Бесплатная выгрузка — наш подарок новым клиентам!</i>",
+            reply_markup=get_user_keyboard()
+        )
 
 @dp.message(Command("help"))
 async def cmd_help(message: types.Message):
@@ -804,7 +794,6 @@ async def cmd_help(message: types.Message):
 /start - Начать работу с ботом
 /help - Показать эту справку
 /unsubscribe - Отписаться от рассылок
-/menu - Показать главное меню
 
 <b>Для администратора:</b>
 /admin - Панель администратора
@@ -829,13 +818,7 @@ async def cmd_admin(message: types.Message):
     
     await message.answer(
         "🛠️ <b>Панель администратора</b>\n\n"
-        "Здесь вы можете управлять всеми функциями бота:\n"
-        "• 📊 Просматривать новые анкеты\n"
-        "• 📤 Отправлять тендеры пользователям\n"
-        "• 📈 Смотреть отчеты эффективности\n"
-        "• 📣 Настраивать и запускать рассылки\n"
-        "• 📋 Экспортировать данные\n"
-        "• ⚙️ Настраивать параметры бота",
+        "Выберите действие:",
         reply_markup=get_admin_keyboard()
     )
 
@@ -854,23 +837,28 @@ async def cmd_unsubscribe(message: types.Message):
     else:
         await message.answer("❌ Произошла ошибка при отписке. Попробуйте позже.")
 
-@dp.message(Command("menu"))
-async def cmd_menu(message: types.Message):
-    """Показать главное меню"""
-    if message.from_user.id == config.ADMIN_ID:
-        await message.answer("📋 <b>Главное меню</b>", reply_markup=get_admin_keyboard())
-    else:
-        await message.answer("📋 <b>Главное меню</b>", reply_markup=get_start_keyboard())
-
 # =========== ОБРАБОТЧИКИ СОБЫТИЙ ===========
-@dp.message(F.text == "👤 В меню пользователя")
-async def to_user_menu(message: types.Message):
-    """Переход в меню пользователя"""
-    await message.answer("👤 <b>Меню пользователя</b>", reply_markup=get_start_keyboard())
+@dp.message(F.text == "👤 Переключиться на меню пользователя")
+async def switch_to_user_menu(message: types.Message):
+    """Переключение на меню пользователя"""
+    if message.from_user.id != config.ADMIN_ID:
+        return
+    
+    await message.answer(
+        "👤 <b>Вы переключились в режим пользователя</b>\n\n"
+        "Здесь вы можете протестировать функции бота как обычный пользователь.\n\n"
+        "Чтобы вернуться в панель администратора, используйте команду /admin",
+        reply_markup=get_user_keyboard()
+    )
 
 @dp.message(F.text == "📝 Заполнить анкету онлайн")
 async def start_online_questionnaire(message: types.Message, state: FSMContext):
     """Начало заполнения анкеты онлайн"""
+    # Админ не должен заполнять анкету
+    if message.from_user.id == config.ADMIN_ID:
+        await message.answer("🛠️ Вы находитесь в режиме администратора. Для заполнения анкеты переключитесь в меню пользователя.")
+        return
+    
     await message.answer(
         "📝 <b>Начинаем заполнение анкеты!</b>\n\n"
         "Заполнение займет 5-7 минут. Введите ваше ФИО полностью:",
@@ -881,6 +869,7 @@ async def start_online_questionnaire(message: types.Message, state: FSMContext):
 @dp.message(F.text == "📥 Скачать анкету")
 async def download_questionnaire(message: types.Message):
     """Скачать анкету для заполнения"""
+    # Админ тоже может скачать анкету
     questionnaire_text = """АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ
 
 1. ФИО полностью: ___________________
@@ -936,6 +925,11 @@ async def show_help(message: types.Message):
 @dp.message(F.text == "📞 Консультация")
 async def request_consultation(message: types.Message):
     """Запрос консультации"""
+    # Админ не должен запрашивать консультацию
+    if message.from_user.id == config.ADMIN_ID:
+        await message.answer("🛠️ Вы администратор. Эта функция предназначена для пользователей.")
+        return
+    
     await message.answer(
         "👨‍💼 <b>Запрос на консультацию принят!</b>\n\n"
         "Наш менеджер свяжется с вами в течение 15 минут.\n\n"
@@ -959,19 +953,15 @@ async def request_consultation(message: types.Message):
     # Обновляем статистику
     await db.update_statistics('consultation_requests')
 
-@dp.message(F.text == "🚫 Отписаться")
-async def unsubscribe_from_menu(message: types.Message):
-    """Отписаться от рассылок через меню"""
-    await cmd_unsubscribe(message)
-
 @dp.message(F.text == "❌ Отменить")
 async def cancel_action(message: types.Message, state: FSMContext):
     """Отмена действия"""
     await state.clear()
-    await message.answer(
-        "❌ Действие отменено.",
-        reply_markup=get_start_keyboard()
-    )
+    
+    if message.from_user.id == config.ADMIN_ID:
+        await message.answer("❌ Действие отменено.", reply_markup=get_admin_keyboard())
+    else:
+        await message.answer("❌ Действие отменено.", reply_markup=get_user_keyboard())
 
 # =========== ЗАПОЛНЕНИЕ АНКЕТЫ ===========
 @dp.message(Questionnaire.waiting_for_name)
@@ -1107,7 +1097,7 @@ async def process_regions(message: types.Message, state: FSMContext):
             f"• Контакты организаторов\n"
             f"• Рекомендации по участию\n\n"
             f"<i>Следите за сообщениями!</i>",
-            reply_markup=get_start_keyboard()
+            reply_markup=get_user_keyboard()
         )
         
         # Уведомляем администратора
@@ -1151,7 +1141,7 @@ async def process_regions(message: types.Message, state: FSMContext):
         await message.answer(
             "❌ <b>Ошибка сохранения анкеты.</b>\n\n"
             "Пожалуйста, попробуйте позже или свяжитесь с поддержкой.",
-            reply_markup=get_start_keyboard()
+            reply_markup=get_user_keyboard()
         )
     
     await state.clear()
@@ -1180,7 +1170,7 @@ async def handle_positive_response(message: types.Message):
                 "• Стратегии участия\n"
                 "• Финансовому обеспечению\n\n"
                 "Напишите <b>«Консультация»</b>, и мы свяжемся с вами в течение 15 минут!",
-                reply_markup=get_start_keyboard()
+                reply_markup=get_user_keyboard()
             )
             
             # Уведомляем администратора
@@ -1210,7 +1200,7 @@ async def handle_negative_response(message: types.Message):
             "• Новости госзакупок\n"
             "• Советы по участию\n\n"
             "<i>Следующая рассылка через 3 дня.</i>",
-            reply_markup=get_start_keyboard()
+            reply_markup=get_user_keyboard()
         )
         
         # Добавляем в группу для рассылки
@@ -1248,6 +1238,11 @@ async def handle_send_tender(callback: types.CallbackQuery, state: FSMContext):
 @dp.message(AdminAction.waiting_for_tender_file, F.document)
 async def process_tender_file(message: types.Message, state: FSMContext):
     """Обработка файла с тендерами"""
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этого действия")
+        await state.clear()
+        return
+    
     user_data = await state.get_data()
     questionnaire_id = user_data['questionnaire_id']
     
@@ -1396,6 +1391,10 @@ MAILING_TEMPLATES = [
 @dp.message(F.text == "📣 Начать рассылку")
 async def start_mailing_menu(message: types.Message):
     """Меню рассылок"""
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -1430,6 +1429,10 @@ async def start_mailing_menu(message: types.Message):
 @dp.callback_query(F.data.startswith("mailing_"))
 async def send_mailing_template(callback: types.CallbackQuery):
     """Отправка шаблонной рассылки"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     template_index = int(callback.data.split("_")[1])
     
     if template_index >= len(MAILING_TEMPLATES):
@@ -1499,6 +1502,10 @@ async def send_mailing_template(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "mailing_stats")
 async def show_mailing_stats(callback: types.CallbackQuery):
     """Статистика рассылок"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     # Получаем статистику последних 10 рассылок
     mailings = await db.fetch_all(
         "SELECT * FROM mailings ORDER BY mailing_date DESC LIMIT 10"
@@ -1530,6 +1537,10 @@ async def show_mailing_stats(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "custom_mailing")
 async def start_custom_mailing(callback: types.CallbackQuery, state: FSMContext):
     """Начать свою рассылку"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     await callback.message.answer(
         "✏️ <b>Создание своей рассылки</b>\n\n"
         "Введите текст рассылки. Вы можете использовать HTML-разметку:\n"
@@ -1548,6 +1559,11 @@ async def start_custom_mailing(callback: types.CallbackQuery, state: FSMContext)
 @dp.message(AdminAction.waiting_for_mailing_text)
 async def process_custom_mailing(message: types.Message, state: FSMContext):
     """Обработка текста своей рассылки"""
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этого действия")
+        await state.clear()
+        return
+    
     mailing_text = message.text
     
     # Получаем пользователей для рассылки
@@ -1642,6 +1658,10 @@ async def handle_all_messages(message: types.Message):
 @dp.message(F.text == "📈 Отчет эффективности")
 async def show_efficiency_report(message: types.Message):
     """Показать отчет эффективности"""
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     # Получаем отчет за 14 дней
     report = await db.get_statistics_report(14)
     new_users = await db.get_new_users_count(14)
@@ -1709,6 +1729,10 @@ async def show_efficiency_report(message: types.Message):
 @dp.message(F.text == "📊 Новые анкеты")
 async def show_new_questionnaires(message: types.Message):
     """Показать новые анкеты"""
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     # Анкеты, где тендер еще не отправлен
     questionnaires = await db.fetch_all(
         "SELECT * FROM questionnaires WHERE tender_sent = 0 ORDER BY created_at DESC LIMIT 10"
@@ -1760,6 +1784,10 @@ async def show_new_questionnaires(message: types.Message):
 @dp.message(F.text == "📋 Скачать базу")
 async def download_database(message: types.Message):
     """Скачать базу данных в CSV"""
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     try:
         # Экспорт анкет
         questionnaires = await db.fetch_all(
@@ -1816,6 +1844,10 @@ async def download_database(message: types.Message):
 @dp.message(F.text == "⚙️ Настройки")
 async def show_settings(message: types.Message):
     """Показать настройки бота"""
+    if message.from_user.id != config.ADMIN_ID:
+        await message.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     keyboard = InlineKeyboardMarkup(
         inline_keyboard=[
             [
@@ -1863,6 +1895,10 @@ async def show_settings(message: types.Message):
 @dp.callback_query(F.data == "create_backup")
 async def handle_create_backup(callback: types.CallbackQuery):
     """Создать бэкап базы данных"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     await callback.message.answer("🔄 Создаю резервную копию базы данных...")
     
     backup_path = await create_backup()
@@ -1883,6 +1919,10 @@ async def handle_create_backup(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "db_stats")
 async def handle_db_stats(callback: types.CallbackQuery):
     """Показать статистику базы данных"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     try:
         # Получаем различные статистики
         total_questionnaires = await db.fetch_one("SELECT COUNT(*) as count FROM questionnaires")
@@ -1933,6 +1973,10 @@ async def handle_db_stats(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "clear_cache")
 async def handle_clear_cache(callback: types.CallbackQuery):
     """Очистить кэш"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     # Очищаем LRU кэш
     db.get_user_profile.cache_clear()
     
@@ -1942,6 +1986,10 @@ async def handle_clear_cache(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "show_logs")
 async def handle_show_logs(callback: types.CallbackQuery):
     """Показать последние логи"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     log_file = os.path.join(config.LOGS_DIR, 'bot.log')
     
     if not os.path.exists(log_file):
@@ -1974,6 +2022,10 @@ async def handle_show_logs(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "back_to_admin")
 async def handle_back_to_admin(callback: types.CallbackQuery):
     """Вернуться в меню админа"""
+    if callback.from_user.id != config.ADMIN_ID:
+        await callback.answer("⛔ У вас нет прав для этого действия")
+        return
+    
     await cmd_admin(callback.message)
     await callback.answer()
 
