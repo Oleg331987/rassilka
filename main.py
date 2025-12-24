@@ -25,7 +25,7 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton, 
     InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardRemove, BufferedInputFile,
-    FSInputFile
+    FSInputFile, WebhookInfo
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -78,6 +78,19 @@ class Config:
             except ValueError:
                 print("❌ ADMIN_ID должен быть числом!")
                 self.ADMIN_ID = 0
+        
+        # Railway настройки
+        self.RAILWAY_PUBLIC_DOMAIN = os.getenv("RAILWAY_PUBLIC_DOMAIN", "")
+        self.RAILWAY_STATIC_URL = os.getenv("RAILWAY_STATIC_URL", "")
+        self.PORT = int(os.getenv("PORT", 8080))
+        
+        # Формируем URL для webhook
+        if self.RAILWAY_PUBLIC_DOMAIN:
+            self.WEBHOOK_URL = f"https://{self.RAILWAY_PUBLIC_DOMAIN}/webhook"
+        elif self.RAILWAY_STATIC_URL:
+            self.WEBHOOK_URL = f"{self.RAILWAY_STATIC_URL}/webhook"
+        else:
+            self.WEBHOOK_URL = None
         
         # Настройки базы данных
         self.DB_PATH = os.getenv("DB_PATH", "/app/tenders.db")
@@ -189,7 +202,7 @@ if config.BOT_TOKEN:
     try:
         bot = Bot(
             token=config.BOT_TOKEN,
-            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+            default=DefaultBotProperties(parse_mode=ParseMode.HTHTML)
         )
         storage = MemoryStorage()
         dp = Dispatcher(storage=storage)
@@ -818,6 +831,62 @@ async def create_backup():
     except Exception as e:
         logger.error(f"❌ Ошибка создания бэкапа: {e}")
         return None
+
+# =========== WEBHOOK HANDLER ===========
+async def setup_webhook():
+    """Настройка webhook"""
+    if not config.WEBHOOK_URL:
+        logger.warning("⚠️ WEBHOOK_URL не установлен. Используется polling.")
+        return False
+    
+    try:
+        # Удаляем существующий webhook
+        await bot.delete_webhook()
+        logger.info("✅ Старый webhook удален")
+        
+        # Устанавливаем новый webhook
+        await bot.set_webhook(
+            url=config.WEBHOOK_URL,
+            drop_pending_updates=True
+        )
+        logger.info(f"✅ Webhook установлен на {config.WEBHOOK_URL}")
+        
+        # Проверяем информацию о webhook
+        webhook_info = await bot.get_webhook_info()
+        logger.info(f"ℹ️ Информация о webhook: {webhook_info.url}")
+        
+        return True
+    except Exception as e:
+        logger.error(f"❌ Ошибка настройки webhook: {e}")
+        return False
+
+# =========== HTTP SERVER для WEBHOOK ===========
+class WebhookHandler(BaseHTTPRequestHandler):
+    """Обработчик webhook запросов от Telegram"""
+    def do_POST(self):
+        if self.path == '/webhook':
+            content_length = int(self.headers['Content-Length'])
+            post_data = self.rfile.read(content_length)
+            
+            # Обрабатываем обновление асинхронно
+            asyncio.run(self.process_update(post_data))
+            
+            self.send_response(200)
+            self.end_headers()
+        else:
+            self.send_response(404)
+            self.end_headers()
+    
+    async def process_update(self, post_data):
+        """Асинхронная обработка обновления"""
+        try:
+            update = types.Update.model_validate_json(post_data)
+            await dp.feed_update(bot, update)
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки обновления: {e}")
+    
+    def log_message(self, format, *args):
+        logger.info(f"📨 Webhook запрос: {self.path}")
 
 # =========== ОБРАБОТЧИКИ ОШИБОК ===========
 if dp:
@@ -2298,34 +2367,25 @@ async def main():
     """Основная функция запуска бота"""
     print("🚀 Запуск бота Тритики...")
     
-    # 1. Запускаем healthcheck сервер в отдельном потоке
-    def run_healthcheck():
-        port = int(os.getenv('PORT', 8080))
-        try:
-            server = HTTPServer(('0.0.0.0', port), HealthCheckHandler)
-            print(f"✅ Healthcheck server started on port {port}")
-            server.serve_forever()
-        except Exception as e:
-            print(f"❌ Healthcheck server error: {e}")
-            os._exit(1)
-    
-    # Используем ThreadPoolExecutor для запуска в фоне
-    loop = asyncio.get_event_loop()
-    executor = ThreadPoolExecutor(max_workers=1)
-    loop.run_in_executor(executor, run_healthcheck)
-    
-    # Даем время healthcheck серверу запуститься
-    await asyncio.sleep(2)
-    
-    # 2. Проверяем наличие токена
+    # 1. Проверяем наличие токена
     if not config.BOT_TOKEN:
         print("❌ BOT_TOKEN не установлен!")
         print("⚠️ Healthcheck работает, но бот не будет функционировать")
+        # Запускаем только healthcheck сервер
+        def run_healthcheck():
+            server = HTTPServer(('0.0.0.0', config.PORT), HealthCheckHandler)
+            print(f"✅ Healthcheck server started on port {config.PORT}")
+            server.serve_forever()
+        
+        loop = asyncio.get_event_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.run_in_executor(executor, run_healthcheck)
+        
         while True:
             await asyncio.sleep(3600)
         return
     
-    # 3. Проверяем авторизацию бота
+    # 2. Проверяем авторизацию бота
     try:
         print("🔄 Проверяю авторизацию бота...")
         bot_info = await bot.get_me()
@@ -2333,11 +2393,22 @@ async def main():
     except Exception as e:
         print(f"❌ Ошибка авторизации бота: {e}")
         print("⚠️ Проверьте BOT_TOKEN в настройках Railway")
+        
+        # Запускаем healthcheck сервер
+        def run_healthcheck():
+            server = HTTPServer(('0.0.0.0', config.PORT), HealthCheckHandler)
+            print(f"✅ Healthcheck server started on port {config.PORT}")
+            server.serve_forever()
+        
+        loop = asyncio.get_event_loop()
+        executor = ThreadPoolExecutor(max_workers=1)
+        loop.run_in_executor(executor, run_healthcheck)
+        
         while True:
             await asyncio.sleep(3600)
         return
     
-    # 4. Инициализация базы данных
+    # 3. Инициализация базы данных
     print("🔄 Инициализация базы данных...")
     try:
         with timing("Инициализация БД"):
@@ -2347,39 +2418,97 @@ async def main():
         print(f"❌ Ошибка инициализации базы данных: {e}")
         print("⚠️ Продолжаем без базы данных...")
     
-    # 5. Проверяем наличие файла анкеты
+    # 4. Проверяем наличие файла анкеты
     if not os.path.exists(config.QUESTIONNAIRE_FILE):
         print(f"⚠️ Файл анкеты '{config.QUESTIONNAIRE_FILE}' не найден!")
         print("📝 Будет использована текстовая версия анкеты")
     
-    # 6. Запускаем планировщики в фоне
+    # 5. Пробуем настроить webhook, если доступен URL
+    use_webhook = False
+    if config.WEBHOOK_URL:
+        print(f"🌐 Пробую настроить webhook: {config.WEBHOOK_URL}")
+        webhook_success = await setup_webhook()
+        if webhook_success:
+            use_webhook = True
+            print("✅ Использую webhook режим")
+        else:
+            print("⚠️ Не удалось настроить webhook, использую polling")
+    else:
+        print("⚠️ WEBHOOK_URL не установлен, использую polling")
+    
+    # 6. Запускаем healthcheck сервер в отдельном потоке
+    def run_combined_server():
+        class CombinedHandler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path in ['/', '/health', '/status']:
+                    HealthCheckHandler.do_GET(self)
+                elif self.path == '/webhook' and self.command == 'POST':
+                    # Это обработается в do_POST
+                    pass
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            
+            def do_POST(self):
+                if self.path == '/webhook':
+                    WebhookHandler.do_POST(self)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+            
+            def log_message(self, format, *args):
+                pass
+        
+        server = HTTPServer(('0.0.0.0', config.PORT), CombinedHandler)
+        print(f"✅ HTTP сервер запущен на порту {config.PORT}")
+        server.serve_forever()
+    
+    loop = asyncio.get_event_loop()
+    executor = ThreadPoolExecutor(max_workers=1)
+    loop.run_in_executor(executor, run_combined_server)
+    
+    # Ждем запуска сервера
+    await asyncio.sleep(2)
+    
+    # 7. Запускаем планировщики в фоне
     print("🔄 Запуск фоновых задач...")
     if config.BOT_TOKEN:
         asyncio.create_task(scheduled_mailings())
         asyncio.create_task(check_pending_follow_ups())
     
-    # 7. Запуск бота с подробным логированием
-    print("🤖 Запуск polling...")
+    # 8. Запуск бота
+    print("🤖 Запуск бота...")
     print(f"📊 Информация о боте:")
     print(f"   - Username: @{bot_info.username}")
     print(f"   - ID: {bot_info.id}")
     print(f"   - Админ ID: {config.ADMIN_ID}")
-    print("⏳ Ожидаю обновления от Telegram...")
+    print(f"   - Режим: {'Webhook' if use_webhook else 'Polling'}")
     
-    try:
-        await dp.start_polling(bot, skip_updates=True, 
-                              allowed_updates=dp.resolve_used_update_types())
-    except KeyboardInterrupt:
-        print("⏹️ Бот остановлен пользователем")
-    except Exception as e:
-        print(f"❌ Критическая ошибка при запуске бота: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
-    finally:
-        if bot:
-            await bot.session.close()
-        print("👋 Бот завершил работу")
+    if use_webhook:
+        # В режиме webhook просто ждем
+        print("⏳ Webhook настроен. Ожидаю запросы от Telegram...")
+        try:
+            while True:
+                await asyncio.sleep(3600)
+        except KeyboardInterrupt:
+            print("⏹️ Бот остановлен пользователем")
+    else:
+        # Запускаем polling
+        print("⏳ Запускаю polling...")
+        try:
+            await dp.start_polling(bot, skip_updates=True,
+                                  allowed_updates=dp.resolve_used_update_types())
+        except KeyboardInterrupt:
+            print("⏹️ Бот остановлен пользователем")
+        except Exception as e:
+            print(f"❌ Критическая ошибка при запуске бота: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
+        finally:
+            if bot:
+                await bot.session.close()
+            print("👋 Бот завершил работу")
 
 if __name__ == "__main__":
     try:
