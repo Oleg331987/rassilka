@@ -10,9 +10,10 @@ import logging
 import sqlite3
 import tempfile
 import requests
+import json
+import io
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any, Tuple
-import json
 from pathlib import Path
 
 from aiogram import Bot, Dispatcher, types, F
@@ -23,10 +24,12 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove, FSInputFile
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from docx import Document
+from docx.shared import Inches
 
 # Импорты для HTTP сервера Railway
 from aiohttp import web
@@ -44,6 +47,7 @@ WORK_DAYS = [0, 1, 2, 3, 4]  # Пн-Пт
 # Ссылка на файл анкеты в GitHub
 ANKETA_GITHUB_URL = "https://github.com/Oleg331987/rassilka/raw/main/Anketa.docx"
 ANKETA_LOCAL_PATH = "Anketa.docx"
+ANKETA_TEMPLATE_PATH = "Anketa_Template.docx"
 
 # Настройка логирования
 logging.basicConfig(
@@ -70,6 +74,124 @@ except Exception as e:
     logger.error(f"❌ Ошибка инициализации бота: {e}")
     exit(1)
 
+# =========== СОЗДАНИЕ ШАБЛОНА ANKETA.DOCX ===========
+def create_anketa_template():
+    """Создание шаблона анкеты в формате Word"""
+    try:
+        doc = Document()
+        
+        # Заголовок
+        title = doc.add_heading('Анкета для поиска тендеров', 0)
+        title.alignment = 1  # Центрирование
+        
+        # Информация о компании
+        doc.add_heading('Информация о компании', level=1)
+        
+        # Поле 1: ФИО полностью
+        doc.add_paragraph('1. ФИО полностью:')
+        doc.add_paragraph('__________________________________________________________')
+        
+        # Поле 2: Название компании
+        doc.add_paragraph('2. Название компании:')
+        doc.add_paragraph('__________________________________________________________')
+        
+        # Поле 3: Телефон для связи
+        doc.add_paragraph('3. Телефон для связи:')
+        doc.add_paragraph('__________________________________________________________')
+        
+        # Поле 4: Email для отправки тендеров
+        doc.add_paragraph('4. Email для отправки тендеров:')
+        doc.add_paragraph('__________________________________________________________')
+        
+        # Поле 5: Сфера деятельности компании
+        doc.add_paragraph('5. Сфера деятельности компании:')
+        doc.add_paragraph('__________________________________________________________')
+        doc.add_paragraph('(Пример: строительство, IT-услуги, поставка продуктов)')
+        
+        # Поле 6: Регионы работы
+        doc.add_paragraph('6. Регионы работы (города, области):')
+        doc.add_paragraph('__________________________________________________________')
+        doc.add_paragraph('(Пример: Москва, Московская область, Санкт-Петербург)')
+        
+        # Поле 7: Бюджет контрактов
+        doc.add_paragraph('7. Предпочтительный бюджет контрактов:')
+        doc.add_paragraph('__________________________________________________________')
+        doc.add_paragraph('(Пример: от 100 000 до 1 000 000 руб.)')
+        
+        # Поле 8: Ключевые слова для поиска
+        doc.add_paragraph('8. Ключевые слова для поиска (через запятую):')
+        doc.add_paragraph('__________________________________________________________')
+        doc.add_paragraph('(Пример: строительные работы, поставка оборудования, IT-аутсорсинг)')
+        
+        # Пустое место для подписей
+        doc.add_page_break()
+        doc.add_paragraph('\n\n\n\n')
+        doc.add_paragraph('Дата заполнения: ________________________')
+        doc.add_paragraph('Подпись: ________________________________')
+        
+        # Сохраняем шаблон
+        doc.save(ANKETA_TEMPLATE_PATH)
+        print(f"✅ Шаблон анкеты создан: {ANKETA_TEMPLATE_PATH}")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Ошибка создания шаблона анкеты: {e}")
+        return False
+
+# =========== ФУНКЦИЯ ДЛЯ СОЗДАНИЯ ЗАПОЛНЕННОЙ АНКЕТЫ ===========
+def create_filled_anketa(user_data: dict) -> Optional[str]:
+    """Создание заполненной анкеты на основе данных пользователя"""
+    try:
+        # Создаем новый документ
+        doc = Document()
+        
+        # Заголовок
+        title = doc.add_heading('Анкета для поиска тендеров', 0)
+        title.alignment = 1
+        
+        # Информация о заполнении
+        doc.add_paragraph(f'Дата заполнения: {datetime.now().strftime("%d.%m.%Y %H:%M")}')
+        doc.add_paragraph('Заполнено через бота Тритика')
+        
+        # Информация о компании
+        doc.add_heading('Информация о компании', level=1)
+        
+        # Заполняем поля
+        fields = [
+            ('1. ФИО полностью:', user_data.get('full_name', 'Не указано')),
+            ('2. Название компании:', user_data.get('company_name', 'Не указано')),
+            ('3. Телефон для связи:', user_data.get('phone', 'Не указано')),
+            ('4. Email для отправки тендеров:', user_data.get('email', 'Не указано')),
+            ('5. Сфера деятельности компании:', user_data.get('activity', 'Не указано')),
+            ('6. Регионы работы (города, области):', user_data.get('region', 'Не указано')),
+            ('7. Предпочтительный бюджет контрактов:', user_data.get('budget', 'Не указано')),
+            ('8. Ключевые слова для поиска (через запятую):', user_data.get('keywords', 'Не указано')),
+        ]
+        
+        for label, value in fields:
+            p = doc.add_paragraph()
+            p.add_run(label).bold = True
+            doc.add_paragraph(value)
+            doc.add_paragraph()  # Пустая строка
+        
+        # Подвал
+        doc.add_page_break()
+        doc.add_paragraph('\n\n')
+        doc.add_paragraph('Анкета заполнена через Telegram-бота Тритика')
+        doc.add_paragraph('https://t.me/tritika_tender_bot')
+        
+        # Сохраняем во временный файл
+        temp_file = tempfile.NamedTemporaryFile(suffix='.docx', delete=False)
+        temp_path = temp_file.name
+        doc.save(temp_path)
+        temp_file.close()
+        
+        return temp_path
+        
+    except Exception as e:
+        logger.error(f"Ошибка создания заполненной анкеты: {e}")
+        return None
+
 # =========== СКАЧИВАНИЕ ФАЙЛА ANKETA.DOCX ===========
 async def download_anketa_file():
     """Скачивание файла анкеты с GitHub"""
@@ -84,10 +206,12 @@ async def download_anketa_file():
             return True
         else:
             print(f"❌ Ошибка скачивания файла: HTTP {response.status_code}")
-            return False
+            # Создаем шаблон, если скачивание не удалось
+            return create_anketa_template()
     except Exception as e:
         print(f"❌ Ошибка скачивания анкеты: {e}")
-        return False
+        # Создаем шаблон, если скачивание не удалось
+        return create_anketa_template()
 
 # Скачиваем файл при запуске
 asyncio.run(download_anketa_file())
@@ -137,6 +261,7 @@ class Database:
             region TEXT,
             budget TEXT,
             keywords TEXT,
+            filled_anketa_path TEXT,
             status TEXT DEFAULT 'new',
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -151,11 +276,13 @@ class Database:
             sent_at TIMESTAMP,
             sent_by TEXT DEFAULT 'bot',
             file_path TEXT,
+            file_name TEXT,
             status TEXT DEFAULT 'sent',
             admin_notified BOOLEAN DEFAULT 0,
             follow_up_sent BOOLEAN DEFAULT 0,
             follow_up_at TIMESTAMP,
-            follow_up_response TEXT
+            follow_up_response TEXT,
+            follow_up_scheduled BOOLEAN DEFAULT 0
         )
         ''')
         
@@ -233,15 +360,15 @@ class Database:
         conn.close()
         return True
     
-    def save_questionnaire(self, user_id: int, data: dict):
+    def save_questionnaire(self, user_id: int, data: dict, anketa_path: str = None):
         """Сохранение анкеты"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
         cursor.execute('''
         INSERT INTO questionnaires 
-        (user_id, full_name, company_name, phone, email, activity, region, budget, keywords)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, full_name, company_name, phone, email, activity, region, budget, keywords, filled_anketa_path)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             user_id,
             data.get('full_name'),
@@ -251,7 +378,8 @@ class Database:
             data.get('activity'),
             data.get('region'),
             data.get('budget'),
-            data.get('keywords')
+            data.get('keywords'),
+            anketa_path
         ))
         
         conn.commit()
@@ -276,7 +404,7 @@ class Database:
         
         return last_id
     
-    def create_tender_export(self, questionnaire_id: int, user_id: int):
+    def create_tender_export(self, questionnaire_id: int, user_id: int, file_path: str = None, file_name: str = None):
         """Создание записи о выгрузке тендеров"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
@@ -285,9 +413,9 @@ class Database:
         
         cursor.execute('''
         INSERT INTO tender_exports 
-        (questionnaire_id, user_id, sent_at)
-        VALUES (?, ?, ?)
-        ''', (questionnaire_id, user_id, sent_at))
+        (questionnaire_id, user_id, sent_at, file_path, file_name, follow_up_scheduled)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ''', (questionnaire_id, user_id, sent_at, file_path, file_name, 1))
         
         conn.commit()
         export_id = cursor.lastrowid
@@ -305,6 +433,73 @@ class Database:
         SET sent_by = ?, status = 'completed', admin_notified = 1
         WHERE id = ?
         ''', (admin_name, export_id))
+        
+        conn.commit()
+        conn.close()
+    
+    def save_export_file(self, export_id: int, file_path: str, file_name: str):
+        """Сохранение пути к файлу выгрузки"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        UPDATE tender_exports 
+        SET file_path = ?, file_name = ?, status = 'sent', sent_at = datetime('now')
+        WHERE id = ?
+        ''', (file_path, file_name, export_id))
+        
+        conn.commit()
+        conn.close()
+    
+    def get_exports_for_followup(self):
+        """Получение выгрузок, для которых нужно отправить follow-up"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        # Выгрузки, отправленные более 1 часа назад, но follow-up еще не отправлен
+        one_hour_ago = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
+        
+        cursor.execute('''
+        SELECT te.*, q.full_name, q.company_name, u.user_id, u.username
+        FROM tender_exports te
+        JOIN questionnaires q ON te.questionnaire_id = q.id
+        JOIN users u ON te.user_id = u.user_id
+        WHERE te.status = 'sent' 
+        AND te.follow_up_scheduled = 1
+        AND te.follow_up_sent = 0
+        AND te.sent_at <= ?
+        ''', (one_hour_ago,))
+        
+        exports = cursor.fetchall()
+        conn.close()
+        
+        return exports
+    
+    def mark_followup_sent(self, export_id: int):
+        """Отметка, что follow-up отправлен"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        UPDATE tender_exports 
+        SET follow_up_sent = 1, follow_up_at = datetime('now')
+        WHERE id = ?
+        ''', (export_id,))
+        
+        conn.commit()
+        conn.close()
+    
+    def save_followup_response(self, export_id: int, response: str):
+        """Сохранение ответа на follow-up"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        UPDATE tender_exports 
+        SET follow_up_response = ?
+        WHERE id = ?
+        ''', (response, export_id))
         
         conn.commit()
         conn.close()
@@ -545,6 +740,26 @@ class Database:
         
         return feedback
     
+    def get_mailing_feedback_for_user(self, user_id: int):
+        """Получение обратной связи по пользователю"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT mf.*, mm.mailing_text
+        FROM mailing_feedback mf
+        JOIN manual_mailings mm ON mf.mailing_id = mm.id
+        WHERE mf.user_id = ?
+        ORDER BY mf.created_at DESC
+        LIMIT 10
+        ''', (user_id,))
+        
+        feedback = cursor.fetchall()
+        conn.close()
+        
+        return feedback
+    
     # =========== ОСТАЛЬНЫЕ МЕТОДЫ ===========
     def save_manager_message(self, user_id: int, message_type: str, message_text: str, file_id: str = None, file_name: str = None):
         """Сохранение сообщения менеджеру"""
@@ -561,6 +776,63 @@ class Database:
         conn.close()
         
         return message_id
+    
+    def get_pending_exports(self):
+        """Получение ожидающих выгрузок"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT te.*, q.full_name, q.company_name, q.email, q.phone
+        FROM tender_exports te
+        JOIN questionnaires q ON te.questionnaire_id = q.id
+        WHERE te.status = 'pending' OR te.status = 'sent'
+        ORDER BY te.sent_at DESC
+        LIMIT 10
+        ''')
+        
+        exports = cursor.fetchall()
+        conn.close()
+        
+        return exports
+    
+    def get_questionnaire_by_id(self, questionnaire_id: int):
+        """Получение анкеты по ID"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT q.*, u.username, u.user_id
+        FROM questionnaires q
+        JOIN users u ON q.user_id = u.user_id
+        WHERE q.id = ?
+        ''', (questionnaire_id,))
+        
+        questionnaire = cursor.fetchone()
+        conn.close()
+        
+        return questionnaire
+    
+    def get_export_by_id(self, export_id: int):
+        """Получение выгрузки по ID"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT te.*, q.full_name, q.company_name, q.email, u.username
+        FROM tender_exports te
+        JOIN questionnaires q ON te.questionnaire_id = q.id
+        JOIN users u ON te.user_id = u.user_id
+        WHERE te.id = ?
+        ''', (export_id,))
+        
+        export = cursor.fetchone()
+        conn.close()
+        
+        return export
     
     def get_statistics(self, days: int = 14):
         """Получение статистики за указанный период"""
@@ -612,6 +884,13 @@ class Database:
         ''')
         subscriptions = cursor.fetchone()
         
+        # Анкеты
+        cursor.execute('''
+        SELECT COUNT(*) as count FROM questionnaires 
+        WHERE date(created_at) >= ?
+        ''', (start_date,))
+        new_questionnaires = cursor.fetchone()['count']
+        
         conn.close()
         
         return {
@@ -622,7 +901,8 @@ class Database:
             'mailings_sent': mailings['total_sent'] if mailings['total_sent'] else 0,
             'mailings_feedback': mailings['total_feedback'] if mailings['total_feedback'] else 0,
             'subscribed_users': subscriptions['subscribed'] if subscriptions['subscribed'] else 0,
-            'unsubscribed_users': subscriptions['unsubscribed'] if subscriptions['unsubscribed'] else 0
+            'unsubscribed_users': subscriptions['unsubscribed'] if subscriptions['unsubscribed'] else 0,
+            'new_questionnaires': new_questionnaires
         }
     
     def is_working_hours(self):
@@ -698,7 +978,7 @@ def get_admin_keyboard():
     """Клавиатура администратора"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Новые анкеты"), KeyboardButton(text="✅ Отметить выгрузку")],
+            [KeyboardButton(text="📊 Новые анкеты"), KeyboardButton(text="📤 Отправить выгрузку")],
             [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="📨 Создать рассылку")],
             [KeyboardButton(text="👥 Управление подписками"), KeyboardButton(text="📩 Сообщения менеджеру")],
             [KeyboardButton(text="📋 Обратная связь"), KeyboardButton(text="⚙️ Настройки")],
@@ -714,15 +994,18 @@ def get_cancel_keyboard():
         resize_keyboard=True
     )
 
-def get_follow_up_keyboard():
+def get_follow_up_keyboard(export_id: int):
     """Клавиатура для follow-up"""
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text="✅ Да, нашел подходящее")],
-            [KeyboardButton(text="❌ Нет, не нашел")],
-            [KeyboardButton(text="🤔 Нужна консультация")]
-        ],
-        resize_keyboard=True
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Да, нашел подходящее", callback_data=f"follow_yes_{export_id}"),
+                InlineKeyboardButton(text="❌ Нет, не нашел", callback_data=f"follow_no_{export_id}")
+            ],
+            [
+                InlineKeyboardButton(text="🤔 Нужна консультация", callback_data=f"follow_consult_{export_id}")
+            ]
+        ]
     )
 
 def get_mailing_filters_keyboard():
@@ -784,6 +1067,17 @@ def get_manager_response_keyboard(message_id: int):
         ]
     )
 
+def get_export_confirmation_keyboard(export_id: int):
+    """Клавиатура подтверждения отправки выгрузки"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="✅ Подтвердить отправку", callback_data=f"confirm_export_{export_id}"),
+                InlineKeyboardButton(text="❌ Отменить", callback_data=f"cancel_export_{export_id}")
+            ]
+        ]
+    )
+
 # =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
     waiting_for_name = State()
@@ -806,8 +1100,12 @@ class ManualMailing(StatesGroup):
 class FeedbackComment(StatesGroup):
     waiting_for_comment = State()
 
+class SendExport(StatesGroup):
+    waiting_for_questionnaire_id = State()
+    waiting_for_export_file = State()
+
 # =========== ФУНКЦИЯ ОТПРАВКИ АНКЕТЫ АДМИНИСТРАТОРУ ===========
-async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_data: dict, username: str):
+async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_data: dict, username: str, anketa_path: str = None):
     """Отправка заполненной анкеты администратору"""
     if not ADMIN_ID:
         logger.warning("ADMIN_ID не установлен, анкета не отправлена администратору")
@@ -852,8 +1150,19 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         """
         
         # Отправляем администратору
-        await bot.send_message(ADMIN_ID, admin_message)
-        logger.info(f"Анкета #{questionnaire_id} отправлена администратору {ADMIN_ID}")
+        if anketa_path and os.path.exists(anketa_path):
+            # Отправляем с файлом
+            with open(anketa_path, 'rb') as f:
+                await bot.send_document(
+                    ADMIN_ID,
+                    types.BufferedInputFile(f.read(), filename=f"Анкета_{questionnaire_id}_{username}.docx"),
+                    caption=admin_message
+                )
+            logger.info(f"Анкета #{questionnaire_id} с файлом отправлена администратору {ADMIN_ID}")
+        else:
+            # Отправляем только текст
+            await bot.send_message(ADMIN_ID, admin_message)
+            logger.info(f"Анкета #{questionnaire_id} отправлена администратору {ADMIN_ID}")
         
     except Exception as e:
         logger.error(f"Ошибка при отправке анкеты администратору: {e}")
@@ -867,7 +1176,10 @@ async def send_anketa_file(user_id: int):
             with open(ANKETA_LOCAL_PATH, 'rb') as anketa_file:
                 await bot.send_document(
                     user_id,
-                    anketa_file,
+                    types.BufferedInputFile(
+                        anketa_file.read(), 
+                        filename=f"Анкета_Тритика_шаблон.docx"
+                    ),
                     caption=(
                         "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
                         "Вы можете заполнить эту анкету и отправить нам:\n\n"
@@ -881,7 +1193,7 @@ async def send_anketa_file(user_id: int):
         else:
             # Пытаемся скачать файл заново
             print("Файл анкеты не найден, пытаюсь скачать...")
-            if asyncio.run(download_anketa_file()):
+            if await download_anketa_file():
                 return await send_anketa_file(user_id)
             else:
                 await bot.send_message(
@@ -894,6 +1206,49 @@ async def send_anketa_file(user_id: int):
     except Exception as e:
         logger.error(f"Ошибка при отправке файла анкеты: {e}")
         return False
+
+# =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ FOLLOW-UP СООБЩЕНИЙ ===========
+async def send_follow_up_messages():
+    """Отправка follow-up сообщений через 1 час после выгрузки"""
+    try:
+        exports = db.get_exports_for_followup()
+        
+        for export in exports:
+            export_id = export['id']
+            user_id = export['user_id']
+            username = export['username'] or "Пользователь"
+            
+            try:
+                # Отправляем follow-up сообщение
+                await bot.send_message(
+                    user_id,
+                    f"📨 <b>Подборка тендеров отправлена!</b>\n\n"
+                    f"Удалось ли найти что-то подходящее?",
+                    reply_markup=get_follow_up_keyboard(export_id)
+                )
+                
+                # Отмечаем, что follow-up отправлен
+                db.mark_followup_sent(export_id)
+                
+                logger.info(f"Follow-up отправлен пользователю {user_id} для выгрузки #{export_id}")
+                
+            except Exception as e:
+                logger.error(f"Ошибка отправки follow-up пользователю {user_id}: {e}")
+                
+    except Exception as e:
+        logger.error(f"Ошибка в send_follow_up_messages: {e}")
+
+# =========== ФУНКЦИЯ ДЛЯ ПЛАНИРОВАНИЯ FOLLOW-UP ===========
+async def schedule_follow_ups():
+    """Планирование отправки follow-up сообщений"""
+    while True:
+        try:
+            await send_follow_up_messages()
+        except Exception as e:
+            logger.error(f"Ошибка в schedule_follow_ups: {e}")
+        
+        # Проверяем каждые 5 минут
+        await asyncio.sleep(300)
 
 # =========== ОБРАБОТЧИКИ КОМАНД ===========
 @dp.message(Command("start"))
@@ -1007,21 +1362,12 @@ async def cmd_admin(message: types.Message, state: FSMContext):
 # =========== ОБРАБОТЧИКИ КНОПОК ===========
 @dp.message(F.text == "📝 Заполнить анкету онлайн")
 async def start_online_questionnaire(message: types.Message, state: FSMContext):
-    """Начало заполнения анкеты онлайн - СНАЧАЛА ОТПРАВЛЯЕМ ФАЙЛ"""
+    """Начало заполнения анкеты онлайн"""
     await state.clear()
     
-    user = message.from_user
-    
-    # Сначала отправляем файл анкеты
-    await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>")
-    file_sent = await send_anketa_file(user.id)
-    
-    if file_sent:
-        await asyncio.sleep(1)  # Небольшая пауза
-    
-    # Затем начинаем заполнение анкеты онлайн
+    # Начинаем заполнение анкеты онлайн
     await message.answer(
-        "📝 <b>Теперь начнем заполнение анкеты онлайн!</b>\n\n"
+        "📝 <b>Заполнение анкеты онлайн</b>\n\n"
         "Заполнение займет 3-5 минут. Введите ваше <b>ФИО полностью</b>:",
         reply_markup=get_cancel_keyboard()
     )
@@ -1034,6 +1380,16 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
     
     await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>")
     await send_anketa_file(message.from_user.id)
+    
+    # После отправки шаблона, предлагаем заполнить онлайн или отправить менеджеру
+    await message.answer(
+        "📝 <b>Что дальше?</b>\n\n"
+        "1. Заполните анкету на компьютере\n"
+        "2. Сохраните файл\n"
+        "3. Отправьте его менеджеру через кнопку <b>'Написать менеджеру'</b>\n\n"
+        "Или вы можете заполнить анкету прямо здесь через <b>'Заполнить анкету онлайн'</b>",
+        reply_markup=get_main_keyboard()
+    )
 
 @dp.message(F.text == "📤 Написать менеджеру")
 async def start_manager_dialog(message: types.Message, state: FSMContext):
@@ -1087,7 +1443,9 @@ async def cancel_action(message: types.Message, state: FSMContext):
                          ManualMailing.waiting_for_text,
                          ManualMailing.waiting_for_filter,
                          ManualMailing.waiting_for_confirmation,
-                         FeedbackComment.waiting_for_comment]:
+                         FeedbackComment.waiting_for_comment,
+                         SendExport.waiting_for_questionnaire_id,
+                         SendExport.waiting_for_export_file]:
         await state.clear()
         is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
         
@@ -1349,72 +1707,218 @@ async def show_new_questionnaires(message: types.Message):
     
     await message.answer(response)
 
-@dp.message(F.text == "✅ Отметить выгрузку")
-async def mark_export_completed(message: types.Message):
-    """Отметить выгрузку как выполненную"""
+@dp.message(F.text == "📤 Отправить выгрузку")
+async def start_send_export(message: types.Message, state: FSMContext):
+    """Начало отправки выгрузки пользователю"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Доступ запрещен")
         return
     
+    await state.set_state(SendExport.waiting_for_questionnaire_id)
     await message.answer(
-        "Введите ID анкеты, по которой выполнена выгрузка:\n"
-        "<i>(ID можно взять из списка новых анкет)</i>"
+        "📤 <b>Отправка выгрузки пользователю</b>\n\n"
+        "Введите ID анкеты для которой нужно отправить выгрузку:\n"
+        "<i>(ID можно взять из списка новых анкет)</i>",
+        reply_markup=get_cancel_keyboard()
     )
 
-@dp.message(F.text.regexp(r'^\d+$'))
-async def process_export_id(message: types.Message):
-    """Обработка ID анкеты для отметки выгрузки"""
-    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+@dp.message(SendExport.waiting_for_questionnaire_id)
+async def process_export_questionnaire_id(message: types.Message, state: FSMContext):
+    """Обработка ID анкеты для отправки выгрузки"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard())
+        return
+    
+    if not message.text.isdigit():
+        await message.answer("❌ Пожалуйста, введите числовой ID анкеты")
         return
     
     questionnaire_id = int(message.text)
     
-    # Получаем информацию об анкете
-    conn = sqlite3.connect("tenders.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT q.*, u.user_id 
-    FROM questionnaires q
-    JOIN users u ON q.user_id = u.user_id
-    WHERE q.id = ?
-    ''', (questionnaire_id,))
-    
-    questionnaire = cursor.fetchone()
-    conn.close()
+    # Проверяем существование анкеты
+    questionnaire = db.get_questionnaire_by_id(questionnaire_id)
     
     if not questionnaire:
         await message.answer("❌ Анкета с таким ID не найдена")
         return
     
-    # Создаем запись о выгрузке
-    export_id = db.create_tender_export(questionnaire_id, questionnaire['user_id'])
-    db.mark_export_completed(export_id, message.from_user.first_name)
-    
-    # Отправляем пользователю уведомление
-    time_info = ""
-    if db.is_working_hours():
-        time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
-    else:
-        next_time = db.get_next_working_time()
-        time_info = f"⏱️ <b>Запрос получен в нерабочее время. Вышлю с 9:00 до 17:00 {next_time.strftime('%d.%m.%Y')}.</b>"
-    
-    try:
-        await bot.send_message(
-            questionnaire['user_id'],
-            f"🎉 <b>Ваша анкета #{questionnaire_id} принята в обработку!</b>\n\n"
-            f"{time_info}"
-        )
-    except Exception as e:
-        logger.error(f"Не удалось отправить уведомление пользователю: {e}")
+    await state.update_data(questionnaire_id=questionnaire_id)
+    await state.set_state(SendExport.waiting_for_export_file)
     
     await message.answer(
-        f"✅ Выгрузка по анкете #{questionnaire_id} отмечена как выполненная\n\n"
-        f"👤 Пользователь: {questionnaire['full_name']}\n"
-        f"🏢 Компания: {questionnaire['company_name']}\n"
-        f"📧 Email: {questionnaire['email']}"
+        f"✅ <b>Анкета #{questionnaire_id} найдена</b>\n\n"
+        f"👤 <b>Пользователь:</b> {questionnaire['full_name']}\n"
+        f"🏢 <b>Компания:</b> {questionnaire['company_name']}\n"
+        f"📧 <b>Email:</b> {questionnaire['email']}\n\n"
+        f"Теперь отправьте файл с выгрузкой тендеров:\n"
+        f"<i>(Поддерживаются файлы: PDF, Excel, Word, ZIP, RAR)</i>",
+        reply_markup=get_cancel_keyboard()
     )
+
+@dp.message(SendExport.waiting_for_export_file)
+async def process_export_file(message: types.Message, state: FSMContext):
+    """Обработка файла выгрузки"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard())
+        return
+    
+    if not message.document:
+        await message.answer("❌ Пожалуйста, отправьте файл с выгрузкой")
+        return
+    
+    data = await state.get_data()
+    questionnaire_id = data.get('questionnaire_id')
+    
+    if not questionnaire_id:
+        await message.answer("❌ Ошибка: ID анкеты не найден")
+        await state.clear()
+        return
+    
+    questionnaire = db.get_questionnaire_by_id(questionnaire_id)
+    if not questionnaire:
+        await message.answer("❌ Анкета не найдена")
+        await state.clear()
+        return
+    
+    # Сохраняем файл во временное хранилище
+    file_id = message.document.file_id
+    file_name = message.document.file_name
+    
+    try:
+        # Скачиваем файл
+        file = await bot.get_file(file_id)
+        file_path = file.file_path
+        
+        # Создаем временный файл
+        temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file_name}")
+        temp_path = temp_file.name
+        temp_file.close()
+        
+        # Скачиваем файл
+        await bot.download_file(file_path, temp_path)
+        
+        # Создаем запись о выгрузке
+        export_id = db.create_tender_export(
+            questionnaire_id, 
+            questionnaire['user_id'],
+            temp_path,
+            file_name
+        )
+        
+        # Показываем подтверждение
+        keyboard = get_export_confirmation_keyboard(export_id)
+        
+        await message.answer(
+            f"📤 <b>Подтверждение отправки выгрузки</b>\n\n"
+            f"📄 <b>Файл:</b> {file_name}\n"
+            f"👤 <b>Пользователь:</b> {questionnaire['full_name']}\n"
+            f"🏢 <b>Компания:</b> {questionnaire['company_name']}\n"
+            f"📧 <b>Email:</b> {questionnaire['email']}\n"
+            f"🆔 <b>ID выгрузки:</b> {export_id}\n\n"
+            f"<i>Подтвердите отправку выгрузки пользователю.</i>",
+            reply_markup=keyboard
+        )
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки файла выгрузки: {e}")
+        await message.answer(f"❌ Ошибка обработки файла: {e}")
+    
+    await state.clear()
+
+@dp.callback_query(F.data.startswith("confirm_export_"))
+async def handle_confirm_export(callback: types.CallbackQuery):
+    """Подтверждение отправки выгрузки"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    export_id = int(callback.data.split("_")[2])
+    
+    # Получаем информацию о выгрузке
+    export = db.get_export_by_id(export_id)
+    
+    if not export:
+        await callback.answer("Выгрузка не найдена", show_alert=True)
+        return
+    
+    try:
+        # Отправляем файл пользователю
+        user_id = export['user_id']
+        file_path = export['file_path']
+        file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
+        
+        if file_path and os.path.exists(file_path):
+            with open(file_path, 'rb') as f:
+                await bot.send_document(
+                    user_id,
+                    types.BufferedInputFile(f.read(), filename=file_name),
+                    caption=(
+                        f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
+                        f"🏢 <b>Компания:</b> {export['company_name']}\n"
+                        f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
+                        f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                        f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
+                    )
+                )
+            
+            # Обновляем статус выгрузки
+            db.mark_export_completed(export_id, callback.from_user.first_name)
+            
+            # Отмечаем, что follow-up запланирован (автоматически через 1 час)
+            
+            await callback.message.edit_text(
+                callback.message.text + "\n\n✅ <b>ВЫГРУЗКА ОТПРАВЛЕНА</b>",
+                reply_markup=None
+            )
+            
+            # Отправляем подтверждение админу
+            await callback.message.answer(
+                f"✅ <b>Выгрузка #{export_id} отправлена пользователю</b>\n\n"
+                f"👤 Пользователь: {export['full_name']}\n"
+                f"🏢 Компания: {export['company_name']}\n"
+                f"📄 Файл: {file_name}\n\n"
+                f"<i>Через 1 час пользователь получит follow-up сообщение.</i>"
+            )
+            
+        else:
+            await callback.answer("Файл выгрузки не найден", show_alert=True)
+            
+    except Exception as e:
+        logger.error(f"Ошибка отправки выгрузки: {e}")
+        await callback.answer(f"Ошибка отправки: {e}", show_alert=True)
+
+@dp.callback_query(F.data.startswith("cancel_export_"))
+async def handle_cancel_export(callback: types.CallbackQuery):
+    """Отмена отправки выгрузки"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    export_id = int(callback.data.split("_")[2])
+    
+    # Удаляем временный файл если есть
+    export = db.get_export_by_id(export_id)
+    if export and export['file_path'] and os.path.exists(export['file_path']):
+        try:
+            os.remove(export['file_path'])
+        except:
+            pass
+    
+    # Удаляем запись из БД
+    conn = sqlite3.connect("tenders.db")
+    cursor = conn.cursor()
+    cursor.execute('DELETE FROM tender_exports WHERE id = ?', (export_id,))
+    conn.commit()
+    conn.close()
+    
+    await callback.message.edit_text(
+        callback.message.text + "\n\n❌ <b>ОТПРАВКА ОТМЕНЕНА</b>",
+        reply_markup=None
+    )
+    
+    await callback.answer("Отправка выгрузки отменена")
 
 @dp.message(F.text == "📈 Статистика")
 async def show_statistics(message: types.Message):
@@ -1430,6 +1934,7 @@ async def show_statistics(message: types.Message):
 
 👥 <b>Пользователи:</b>
 • Новых пользователей: {stats['new_users']}
+• Новых анкет: {stats['new_questionnaires']}
 • С подпиской: {stats['subscribed_users']}
 • Без подписки: {stats['unsubscribed_users']}
 
@@ -1449,6 +1954,63 @@ async def show_statistics(message: types.Message):
 """
     
     await message.answer(response)
+
+# =========== ОБРАБОТЧИКИ FOLLOW-UP СООБЩЕНИЙ ===========
+@dp.callback_query(F.data.startswith("follow_"))
+async def handle_follow_up_response(callback: types.CallbackQuery):
+    """Обработка ответа на follow-up сообщение"""
+    try:
+        parts = callback.data.split("_")
+        response_type = parts[1]  # yes, no, consult
+        export_id = int(parts[2])
+        
+        user_id = callback.from_user.id
+        username = callback.from_user.username or "без username"
+        
+        # Сохраняем ответ
+        response_map = {
+            "yes": "Да, нашел подходящее",
+            "no": "Нет, не нашел",
+            "consult": "Нужна консультация"
+        }
+        
+        response_text = response_map.get(response_type, "Неизвестно")
+        db.save_followup_response(export_id, response_text)
+        
+        # Отправляем благодарность
+        thank_you_text = {
+            "yes": "Отлично! Мы рады, что вы нашли подходящие тендеры. 🎉",
+            "no": "Жаль, что не нашли подходящее. Мы можем сделать более точную подборку. 📊",
+            "consult": "Хорошо! Наш менеджер свяжется с вами для консультации. 👨‍💼"
+        }
+        
+        await callback.message.edit_text(
+            callback.message.text + f"\n\n✅ <b>Спасибо за ваш ответ!</b>\n{thank_you_text.get(response_type, '')}",
+            reply_markup=None
+        )
+        
+        # Уведомляем администратора
+        if ADMIN_ID:
+            try:
+                export = db.get_export_by_id(export_id)
+                if export:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"📨 <b>ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА FOLLOW-UP</b>\n\n"
+                        f"👤 Пользователь: @{username}\n"
+                        f"🆔 ID: {user_id}\n"
+                        f"🏢 Компания: {export['company_name']}\n"
+                        f"💬 Ответ: {response_text}\n"
+                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+                    )
+            except Exception as e:
+                logger.error(f"Не удалось уведомить админа о follow-up: {e}")
+        
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"Ошибка обработки follow-up ответа: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
 
 # =========== УПРАВЛЕНИЕ ПОДПИСКАМИ ===========
 @dp.message(F.text == "👥 Управление подписками")
@@ -2488,42 +3050,97 @@ async def process_budget(message: types.Message, state: FSMContext):
 
 @dp.message(Questionnaire.waiting_for_keywords)
 async def process_keywords(message: types.Message, state: FSMContext):
-    """Завершение анкеты - ТЕПЕРЬ ОТПРАВЛЯЕТСЯ АДМИНИСТРАТОРУ"""
+    """Завершение анкеты - СОЗДАНИЕ И ОТПРАВКА ФАЙЛА АНКЕТЫ ПОЛЬЗОВАТЕЛЮ"""
     user_data = await state.get_data()
     user_data['keywords'] = message.text.strip()
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
     
-    # Сохраняем анкету
-    questionnaire_id = db.save_questionnaire(user_id, user_data)
+    # Создаем заполненную анкету в формате Word
+    anketa_path = create_filled_anketa(user_data)
     
-    if questionnaire_id:
-        # Создаем задачу на выгрузку
-        export_id = db.create_tender_export(questionnaire_id, user_id)
-        
-        # Определяем время отправки
-        if db.is_working_hours():
-            time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
-        else:
-            next_time = db.get_next_working_time()
-            time_info = f"⏱️ <b>Запрос получен в нерабочее время. Вышлю с 9:00 до 17:00 {next_time.strftime('%d.%m.%Y')}.</b>"
-        
-        await message.answer(
-            f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
-            f"{time_info}",
-            reply_markup=get_main_keyboard()
-        )
-        
-        # ВАЖНО: Теперь отправляем анкету администратору
-        await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
-        
-        logger.info(f"Анкета #{questionnaire_id} сохранена и отправлена администратору")
+    if anketa_path:
+        try:
+            # Отправляем заполненную анкету пользователю
+            with open(anketa_path, 'rb') as f:
+                await bot.send_document(
+                    user_id,
+                    types.BufferedInputFile(f.read(), filename=f"Анкета_Тритика_{user_data.get('company_name', '')}.docx"),
+                    caption=(
+                        "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
+                        "✅ <b>Вы можете:</b>\n"
+                        "1. Сохранить этот файл на компьютере\n"
+                        "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
+                        "3. Или мы обработаем ее автоматически\n\n"
+                        "<i>Анкета также отправлена менеджеру для обработки.</i>"
+                    )
+                )
+            
+            # Сохраняем анкету в БД с путем к файлу
+            questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
+            
+            if questionnaire_id:
+                # Создаем задачу на выгрузку
+                export_id = db.create_tender_export(questionnaire_id, user_id)
+                
+                # Определяем время отправки
+                if db.is_working_hours():
+                    time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
+                else:
+                    next_time = db.get_next_working_time()
+                    time_info = f"⏱️ <b>Запрос получен в нерабочее время. Вышлю с 9:00 до 17:00 {next_time.strftime('%d.%m.%Y')}.</b>"
+                
+                await message.answer(
+                    f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
+                    f"{time_info}\n\n"
+                    f"<i>Заполненная анкета отправлена вам выше. Вы можете отправить ее менеджеру для ускорения обработки.</i>",
+                    reply_markup=get_main_keyboard()
+                )
+                
+                # Отправляем анкету администратору
+                await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username, anketa_path)
+                
+                logger.info(f"Анкета #{questionnaire_id} сохранена, файл создан и отправлен администратору")
+            else:
+                await message.answer(
+                    "❌ <b>Ошибка при сохранении анкеты в базе данных</b>\n\n"
+                    "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
+                    reply_markup=get_main_keyboard()
+                )
+            
+        except Exception as e:
+            logger.error(f"Ошибка отправки файла анкеты: {e}")
+            await message.answer(
+                "❌ <b>Ошибка при создании файла анкеты</b>\n\n"
+                "Пожалуйста, попробуйте заполнить анкету еще раз или свяжитесь с поддержкой.",
+                reply_markup=get_main_keyboard()
+            )
     else:
-        await message.answer(
-            "❌ <b>Ошибка при сохранении анкеты</b>\n\n"
-            "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
-            reply_markup=get_main_keyboard()
-        )
+        # Если не удалось создать файл, сохраняем без него
+        questionnaire_id = db.save_questionnaire(user_id, user_data)
+        
+        if questionnaire_id:
+            export_id = db.create_tender_export(questionnaire_id, user_id)
+            
+            if db.is_working_hours():
+                time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
+            else:
+                next_time = db.get_next_working_time()
+                time_info = f"⏱️ <b>Запрос получен в нерабочее время. Вышлю с 9:00 до 17:00 {next_time.strftime('%d.%m.%Y')}.</b>"
+            
+            await message.answer(
+                f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
+                f"{time_info}",
+                reply_markup=get_main_keyboard()
+            )
+            
+            await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
+        else:
+            await message.answer(
+                "❌ <b>Ошибка при сохранении анкеты</b>\n\n"
+                "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
+                reply_markup=get_main_keyboard()
+            )
     
     await state.clear()
 
@@ -2533,6 +3150,11 @@ async def main():
     print("\n" + "="*60)
     print("🚀 ЗАПУСК БОТА ТРИТИКА (ТЕНДЕРПОИСК)")
     print("="*60)
+    
+    # Создаем шаблон анкеты если его нет
+    if not os.path.exists(ANKETA_TEMPLATE_PATH):
+        print("📝 Создаю шаблон анкеты...")
+        create_anketa_template()
     
     # Скачиваем файл анкеты при запуске
     print("📥 Проверяю наличие файла анкеты...")
@@ -2557,6 +3179,10 @@ async def main():
         print(f"❌ Ошибка проверки бота: {e}")
         print("⚠️ Проверьте токен бота")
         return
+    
+    # Запускаем задачу для follow-up сообщений
+    asyncio.create_task(schedule_follow_ups())
+    print("✅ Follow-up система запущена")
     
     # Создаем HTTP приложение для Railway healthcheck
     app = web.Application()
@@ -2586,6 +3212,7 @@ async def main():
     print("🛠️ Админ-панель: /admin (если настроен ADMIN_ID)")
     print("\n🔄 Ожидание сообщений...")
     print(f"🌐 Health check активен на порту {PORT}\n")
+    print("⏰ Follow-up система активна (проверка каждые 5 минут)")
     
     # Запускаем polling бота
     try:
