@@ -7,7 +7,6 @@
 import os
 import asyncio
 import logging
-import json
 import sqlite3
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
@@ -19,18 +18,17 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
-    InlineKeyboardMarkup, InlineKeyboardButton,
     ReplyKeyboardRemove
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 # =========== НАСТРОЙКИ ===========
-# ВАШ ТОКЕН БОТА
-BOT_TOKEN = "8227089023:AAFHtDuflB-wKcxp-bEwfPU0AgD1smFyt5I"
+# ШАГ 1: ПОЛУЧИТЕ ТОКЕН У @BotFather И ВСТАВЬТЕ СЮДА
+BOT_TOKEN = "8211246909:AAGFcJORAvcUqVIRWGxClSsolgODQS4R0kY"
 
-# ID администратора (узнать у @userinfobot)
-ADMIN_ID = None  # Замените на ваш ID
+# ШАГ 2: УЗНАЙТЕ СВОЙ ID У @userinfobot И ВСТАВЬТЕ СЮДА
+ADMIN_ID = 6003624437  # Пример: 123456789
 
 # Настройка логирования
 logging.basicConfig(
@@ -418,7 +416,7 @@ async def download_questionnaire(message: types.Message):
         "📄 <b>Скачайте анкету для заполнения</b>\n\n"
         "Вы можете заполнить анкету в Word и отправить нам.\n\n"
         "📧 <b>Email для отправки:</b> info@tenderpoisk.ru\n"
-        "👨‍💼 <b>Менеджер в Telegram:</b> @tender_manager\n\n"
+        "👨‍💼 <b>Менджер в Telegram:</b> @tender_manager\n\n"
         "Или заполните анкету онлайн через бота (быстрее и удобнее)."
     )
     
@@ -804,7 +802,7 @@ async def handle_consultation_request(message: types.Message):
         "<b>Что обсудим:</b>\n"
         "• Подготовку документов для участия\n"
         "• Требования конкретных тендеров\n"
-        "• Стратегию подачи заявок\n"
+        "• Стратегию подачи заявки\n"
         "• Финансовое обеспечение\n\n"
         "⏱️ <b>Ожидайте звонка или сообщения.</b>"
     )
