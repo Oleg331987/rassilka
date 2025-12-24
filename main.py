@@ -9,9 +9,11 @@ import asyncio
 import logging
 import sqlite3
 import tempfile
+import requests
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 import json
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -39,6 +41,10 @@ WORK_START_HOUR = 9
 WORK_END_HOUR = 17
 WORK_DAYS = [0, 1, 2, 3, 4]  # Пн-Пт
 
+# Ссылка на файл анкеты в GitHub
+ANKETA_GITHUB_URL = "https://github.com/Oleg331987/rassilka/raw/main/Anketa.docx"
+ANKETA_LOCAL_PATH = "Anketa.docx"
+
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
@@ -63,6 +69,28 @@ try:
 except Exception as e:
     logger.error(f"❌ Ошибка инициализации бота: {e}")
     exit(1)
+
+# =========== СКАЧИВАНИЕ ФАЙЛА ANKETA.DOCX ===========
+async def download_anketa_file():
+    """Скачивание файла анкеты с GitHub"""
+    try:
+        print("⬇️ Скачиваю файл анкеты с GitHub...")
+        response = requests.get(ANKETA_GITHUB_URL, timeout=30)
+        
+        if response.status_code == 200:
+            with open(ANKETA_LOCAL_PATH, 'wb') as f:
+                f.write(response.content)
+            print(f"✅ Файл анкеты сохранен: {ANKETA_LOCAL_PATH}")
+            return True
+        else:
+            print(f"❌ Ошибка скачивания файла: HTTP {response.status_code}")
+            return False
+    except Exception as e:
+        print(f"❌ Ошибка скачивания анкеты: {e}")
+        return False
+
+# Скачиваем файл при запуске
+asyncio.run(download_anketa_file())
 
 # =========== БАЗА ДАННЫХ ===========
 class Database:
@@ -527,61 +555,94 @@ class ManualMailing(StatesGroup):
     waiting_for_filter = State()
     waiting_for_confirmation = State()
 
-# =========== ГЕНЕРАЦИЯ ДОКУМЕНТОВ ===========
-def generate_anketa_docx(user_data: dict = None):
-    """Генерация анкеты в формате DOCX (текстовый файл с расширением .docx)"""
-    from docx import Document
-    from docx.shared import Inches, Pt
-    from docx.enum.text import WD_ALIGN_PARAGRAPH
+# =========== ФУНКЦИЯ ОТПРАВКИ АНКЕТЫ АДМИНИСТРАТОРУ ===========
+async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_data: dict, username: str):
+    """Отправка заполненной анкеты администратору"""
+    if not ADMIN_ID:
+        logger.warning("ADMIN_ID не установлен, анкета не отправлена администратору")
+        return
     
-    # Создаем документ
-    doc = Document()
-    
-    # Заголовок
-    title = doc.add_heading('АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ', 0)
-    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
-    
-    # Информация о компании
-    doc.add_paragraph('Компания: Тритика (TenderGo)')
-    doc.add_paragraph('Дата: ' + datetime.now().strftime('%d.%m.%Y'))
-    doc.add_paragraph()
-    
-    # Если есть данные пользователя
-    if user_data:
-        doc.add_paragraph('Данные заполнены через бота:')
-        doc.add_paragraph(f'1. ФИО полностью: {user_data.get("full_name", "___________________")}')
-        doc.add_paragraph(f'2. Название компании: {user_data.get("company_name", "___________________")}')
-        doc.add_paragraph(f'3. Телефон для связи: {user_data.get("phone", "___________________")}')
-        doc.add_paragraph(f'4. Email для отправки тендеров: {user_data.get("email", "___________________")}')
-        doc.add_paragraph(f'5. Сфера деятельности компании: {user_data.get("activity", "___________________")}')
-        doc.add_paragraph(f'6. Ключевые слова для поиска: {user_data.get("keywords", "___________________")}')
-        doc.add_paragraph(f'7. Бюджет контрактов: {user_data.get("budget", "___________________")}')
-        doc.add_paragraph(f'8. Регионы работы: {user_data.get("region", "___________________")}')
-    else:
-        # Пустая анкета
-        doc.add_paragraph('1. ФИО полностью: ___________________')
-        doc.add_paragraph('2. Название компании: ___________________')
-        doc.add_paragraph('3. Телефон для связи: ___________________')
-        doc.add_paragraph('4. Email для отправки тендеров: ___________________')
-        doc.add_paragraph('5. Сфера деятельности компании: ___________________')
-        doc.add_paragraph('6. Ключевые слова для поиска: ___________________')
-        doc.add_paragraph('7. Бюджет контрактов: ___________________')
-        doc.add_paragraph('8. Регионы работы: ___________________')
-    
-    doc.add_paragraph()
-    doc.add_paragraph('Инструкция по заполнению:')
-    doc.add_paragraph('1. Заполните все поля анкеты')
-    doc.add_paragraph('2. Сохраните файл')
-    doc.add_paragraph('3. Отправьте заполненную анкету:')
-    doc.add_paragraph('   • На email: info@tritica.ru')
-    doc.add_paragraph('   • Или через бота (кнопка "Написать менеджеру")')
-    doc.add_paragraph('   • Или менеджеру в Telegram: @tritica_manager')
-    
-    # Сохраняем во временный файл
-    temp_file = tempfile.NamedTemporaryFile(suffix='.docx', delete=False)
-    doc.save(temp_file.name)
-    
-    return temp_file.name
+    try:
+        # Формируем красивое сообщение с анкетой
+        admin_message = f"""
+📋 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
+
+👤 <b>Пользователь:</b> @{username or 'без username'}
+🆔 <b>Telegram ID:</b> {user_id}
+📅 <b>Дата заполнения:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+<b>Данные анкеты:</b>
+
+<b>1. ФИО полностью:</b>
+{user_data.get('full_name', 'Не указано')}
+
+<b>2. Название компании:</b>
+{user_data.get('company_name', 'Не указано')}
+
+<b>3. Телефон для связи:</b>
+{user_data.get('phone', 'Не указано')}
+
+<b>4. Email для отправки тендеров:</b>
+{user_data.get('email', 'Не указано')}
+
+<b>5. Сфера деятельности компании:</b>
+{user_data.get('activity', 'Не указано')}
+
+<b>6. Регионы работы:</b>
+{user_data.get('region', 'Не указано')}
+
+<b>7. Бюджет контрактов:</b>
+{user_data.get('budget', 'Не указано')}
+
+<b>8. Ключевые слова для поиска:</b>
+{user_data.get('keywords', 'Не указано')}
+
+{'✅ <b>Заполнено в рабочее время</b>' if db.is_working_hours() else '⏰ <b>Заполнено в нерабочее время</b>'}
+        """
+        
+        # Отправляем администратору
+        await bot.send_message(ADMIN_ID, admin_message)
+        logger.info(f"Анкета #{questionnaire_id} отправлена администратору {ADMIN_ID}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке анкеты администратору: {e}")
+
+# =========== ФУНКЦИЯ ОТПРАВКИ ФАЙЛА ANKETA.DOCX ===========
+async def send_anketa_file(user_id: int):
+    """Отправка файла анкеты пользователю"""
+    try:
+        # Проверяем, существует ли файл
+        if os.path.exists(ANKETA_LOCAL_PATH):
+            with open(ANKETA_LOCAL_PATH, 'rb') as anketa_file:
+                await bot.send_document(
+                    user_id,
+                    anketa_file,
+                    caption=(
+                        "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                        "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                        "1. 📧 <b>На email:</b> info@tritica.ru\n"
+                        "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                        "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritica_manager\n\n"
+                        "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+                    )
+                )
+            return True
+        else:
+            # Пытаемся скачать файл заново
+            print("Файл анкеты не найден, пытаюсь скачать...")
+            if asyncio.run(download_anketa_file()):
+                return await send_anketa_file(user_id)
+            else:
+                await bot.send_message(
+                    user_id,
+                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                    "К сожалению, файл анкеты временно недоступен.\n\n"
+                    "Вы можете заполнить анкету онлайн или отправить запрос на email: info@tritica.ru"
+                )
+                return False
+    except Exception as e:
+        logger.error(f"Ошибка при отправке файла анкеты: {e}")
+        return False
 
 # =========== ОБРАБОТЧИКИ КОМАНД ===========
 @dp.message(Command("start"))
@@ -695,11 +756,21 @@ async def cmd_admin(message: types.Message, state: FSMContext):
 # =========== ОБРАБОТЧИКИ КНОПОК ===========
 @dp.message(F.text == "📝 Заполнить анкету онлайн")
 async def start_online_questionnaire(message: types.Message, state: FSMContext):
-    """Начало заполнения анкеты онлайн"""
+    """Начало заполнения анкеты онлайн - СНАЧАЛА ОТПРАВЛЯЕМ ФАЙЛ"""
     await state.clear()
     
+    user = message.from_user
+    
+    # Сначала отправляем файл анкеты
+    await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>")
+    file_sent = await send_anketa_file(user.id)
+    
+    if file_sent:
+        await asyncio.sleep(1)  # Небольшая пауза
+    
+    # Затем начинаем заполнение анкеты онлайн
     await message.answer(
-        "📝 <b>Начинаем заполнение анкеты!</b>\n\n"
+        "📝 <b>Теперь начнем заполнение анкеты онлайн!</b>\n\n"
         "Заполнение займет 3-5 минут. Введите ваше <b>ФИО полностью</b>:",
         reply_markup=get_cancel_keyboard()
     )
@@ -710,59 +781,8 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
     """Скачать анкету в Word"""
     await state.clear()
     
-    try:
-        # Генерируем анкету
-        anketa_path = generate_anketa_docx()
-        
-        # Отправляем файл
-        with open(anketa_path, 'rb') as anketa_file:
-            await message.answer_document(
-                anketa_file,
-                caption=(
-                    "📄 <b>Анкета для заполнения в Word</b>\n\n"
-                    "Заполните анкету и отправьте нам одним из способов:\n\n"
-                    "1. 📧 <b>Email:</b> info@tritica.ru\n"
-                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                    "3. 👨‍💼 <b>Менеджер в Telegram:</b> @tritica_manager\n\n"
-                    "<i>Или заполните анкету онлайн через бота (быстрее и удобнее)</i>"
-                )
-            )
-        
-        # Удаляем временный файл
-        os.unlink(anketa_path)
-        
-    except Exception as e:
-        logger.error(f"Ошибка генерации анкеты: {e}")
-        
-        # Отправляем текстовую версию
-        questionnaire_text = """АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ
-Компания: Тритика
-
-1. ФИО полностью: ___________________
-2. Название компании: ___________________
-3. Телефон для связи: ___________________
-4. Email для отправки тендеров: ___________________
-5. Сфера деятельности компании: ___________________
-6. Ключевые слова для поиска: ___________________
-7. Бюджет контрактов: ___________________
-8. Регионы работы: ___________________
-
-Заполните и отправьте одним из способов:
-• На email: info@tritica.ru
-• Через бота (кнопка "Написать менеджеру")
-• Менеджеру в Telegram: @tritica_manager"""
-        
-        await message.answer(
-            "📄 <b>Анкета для заполнения</b>\n\n"
-            "Вы можете заполнить анкету и отправить нам.\n\n"
-            "<b>Способы отправки:</b>\n"
-            "📧 <b>Email:</b> info@tritica.ru\n"
-            "🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-            "👨‍💼 <b>Менеджер в Telegram:</b> @tritica_manager\n\n"
-            "<i>Или заполните анкету онлайн через бота (быстрее и удобнее)</i>"
-        )
-        
-        await message.answer(f"<pre>{questionnaire_text}</pre>")
+    await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>")
+    await send_anketa_file(message.from_user.id)
 
 @dp.message(F.text == "📤 Написать менеджеру")
 async def start_manager_dialog(message: types.Message, state: FSMContext):
@@ -1433,7 +1453,7 @@ async def show_settings(message: types.Message):
         f"• ID администратора: {ADMIN_ID}\n\n"
         "<b>Функции:</b>\n"
         "✅ Отправка анкет в Word\n"
-        "✅ Диалог с менеджером\n"
+        "✅ Диалог с менеджеру\n"
         "✅ Ручные рассылки\n"
         "✅ Автоматические отчеты\n\n"
         "<i>Для изменения настроек обратитесь к разработчику</i>"
@@ -1531,10 +1551,11 @@ async def process_budget(message: types.Message, state: FSMContext):
 
 @dp.message(Questionnaire.waiting_for_keywords)
 async def process_keywords(message: types.Message, state: FSMContext):
-    """Завершение анкеты"""
+    """Завершение анкеты - ТЕПЕРЬ ОТПРАВЛЯЕТСЯ АДМИНИСТРАТОРУ"""
     user_data = await state.get_data()
     user_data['keywords'] = message.text.strip()
     user_id = message.from_user.id
+    username = message.from_user.username or "без username"
     
     # Сохраняем анкету
     questionnaire_id = db.save_questionnaire(user_id, user_data)
@@ -1556,28 +1577,10 @@ async def process_keywords(message: types.Message, state: FSMContext):
             reply_markup=get_main_keyboard()
         )
         
-        # Уведомление администратору
-        if ADMIN_ID:
-            notification = f"""
-🆕 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
-
-👤 <b>Пользователь:</b> @{message.from_user.username or 'без username'}
-🆔 <b>ID:</b> {user_id}
-🏢 <b>Компания:</b> {user_data['company_name']}
-👨‍💼 <b>ФИО:</b> {user_data['full_name']}
-📞 <b>Телефон:</b> {user_data['phone']}
-📧 <b>Email:</b> {user_data['email']}
-🎯 <b>Сфера:</b> {user_data['activity']}
-
-⏰ <b>Время:</b> {datetime.now().strftime('%H:%M %d.%m.%Y')}
-"""
-            
-            try:
-                await bot.send_message(ADMIN_ID, notification)
-            except Exception as e:
-                logger.error(f"Не удалось отправить уведомление админу: {e}")
+        # ВАЖНО: Теперь отправляем анкету администратору
+        await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
         
-        logger.info(f"Анкета #{questionnaire_id} сохранена")
+        logger.info(f"Анкета #{questionnaire_id} сохранена и отправлена администратору")
     else:
         await message.answer(
             "❌ <b>Ошибка при сохранении анкеты</b>\n\n"
@@ -1594,12 +1597,25 @@ async def main():
     print("🚀 ЗАПУСК БОТА ТРИТИКА (ТЕНДЕРПОИСК)")
     print("="*60)
     
+    # Скачиваем файл анкеты при запуске
+    print("📥 Проверяю наличие файла анкеты...")
+    if not os.path.exists(ANKETA_LOCAL_PATH):
+        print("Файл анкеты не найден, скачиваю...")
+        success = await download_anketa_file()
+        if not success:
+            print("⚠️ Внимание: Файл анкеты не скачан. Функция отправки анкет будет ограничена.")
+    
     # Проверяем бота
     try:
         bot_info = await bot.get_me()
         print(f"✅ Бот: @{bot_info.username}")
         print(f"✅ Имя: {bot_info.first_name}")
         print(f"✅ ID: {bot_info.id}")
+        
+        if ADMIN_ID:
+            print(f"✅ Администратор: {ADMIN_ID}")
+        else:
+            print("⚠️ Администратор не установлен (ADMIN_ID)")
     except Exception as e:
         print(f"❌ Ошибка проверки бота: {e}")
         print("⚠️ Проверьте токен бота")
