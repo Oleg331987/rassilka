@@ -11,7 +11,7 @@ import sqlite3
 import tempfile
 import requests
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 import json
 from pathlib import Path
 
@@ -36,7 +36,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN", "8120629620:AAH2ZjoCPEoE39KRIrf8x9JYhOpScphnK
 ADMIN_ID = int(os.getenv("ADMIN_ID", "6003624437")) if os.getenv("ADMIN_ID") else None
 PORT = int(os.getenv("PORT", 8080))
 
-# Настройки времени работы (пн-пт 9:00-17:00)
+# Настройки времени работы (пн-чт 8:30-17:30 пт 8:30-16:30)
 WORK_START_HOUR = 9
 WORK_END_HOUR = 17
 WORK_DAYS = [0, 1, 2, 3, 4]  # Пн-Пт
@@ -99,11 +99,11 @@ class Database:
         self.init_db()
     
     def init_db(self):
-        """Инициализация базы данных"""
+        """Инициализация базы данных с новыми таблицами"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
-        # Пользователи
+        # Пользователи - добавляем поле для управления рассылкой
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -118,6 +118,7 @@ class Database:
             region TEXT,
             is_active BOOLEAN DEFAULT 1,
             has_filled_questionnaire BOOLEAN DEFAULT 0,
+            mailing_subscribed BOOLEAN DEFAULT 1,  -- Новое: подписка на рассылку
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_mailing_date TIMESTAMP
         )
@@ -158,7 +159,7 @@ class Database:
         )
         ''')
         
-        # Рассылки (ручные)
+        # Рассылки (ручные) - основная таблица
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS manual_mailings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -168,8 +169,34 @@ class Database:
             filter_criteria TEXT,
             sent_count INTEGER DEFAULT 0,
             failed_count INTEGER DEFAULT 0,
+            feedback_count INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             sent_at TIMESTAMP
+        )
+        ''')
+        
+        # Отправленные сообщения рассылки (каждому пользователю)
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS sent_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mailing_id INTEGER,
+            user_id INTEGER,
+            telegram_message_id INTEGER,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            feedback_received BOOLEAN DEFAULT 0
+        )
+        ''')
+        
+        # Обратная связь по рассылкам
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS mailing_feedback (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            mailing_id INTEGER,
+            user_id INTEGER,
+            sent_message_id INTEGER,
+            feedback_type TEXT,  -- like, dislike, comment, unsubscribe
+            feedback_text TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
         
@@ -282,22 +309,127 @@ class Database:
         conn.commit()
         conn.close()
     
-    def save_manager_message(self, user_id: int, message_type: str, message_text: str, file_id: str = None, file_name: str = None):
-        """Сохранение сообщения менеджеру"""
+    # =========== УПРАВЛЕНИЕ РАССЫЛКОЙ ===========
+    def toggle_user_mailing_subscription(self, user_id: int):
+        """Включение/выключение подписки на рассылку"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        # Получаем текущий статус
+        cursor.execute('SELECT mailing_subscribed FROM users WHERE user_id = ?', (user_id,))
+        current = cursor.fetchone()
+        
+        if current:
+            new_status = not bool(current[0])
+            cursor.execute('''
+            UPDATE users 
+            SET mailing_subscribed = ?
+            WHERE user_id = ?
+            ''', (1 if new_status else 0, user_id))
+            
+            conn.commit()
+            conn.close()
+            return new_status
+        
+        conn.close()
+        return None
+    
+    def get_user_mailing_status(self, user_id: int):
+        """Получение статуса подписки на рассылку"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
         cursor.execute('''
-        INSERT INTO manager_messages (user_id, message_type, message_text, file_id, file_name)
-        VALUES (?, ?, ?, ?, ?)
-        ''', (user_id, message_type, message_text, file_id, file_name))
+        SELECT mailing_subscribed, username, first_name, last_name 
+        FROM users 
+        WHERE user_id = ?
+        ''', (user_id,))
         
-        conn.commit()
-        message_id = cursor.lastrowid
+        result = cursor.fetchone()
         conn.close()
         
-        return message_id
+        if result:
+            return {
+                'subscribed': bool(result[0]),
+                'username': result[1],
+                'first_name': result[2],
+                'last_name': result[3]
+            }
+        return None
     
+    def get_users_by_filter(self, filter_type: str):
+        """Получение пользователей по фильтру с учетом подписки"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        if filter_type == "all":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company, mailing_subscribed
+            FROM users 
+            WHERE is_active = 1 AND mailing_subscribed = 1
+            ''')
+        elif filter_type == "with_questionnaire":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company, mailing_subscribed
+            FROM users 
+            WHERE is_active = 1 AND has_filled_questionnaire = 1 AND mailing_subscribed = 1
+            ''')
+        elif filter_type == "without_questionnaire":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company, mailing_subscribed
+            FROM users 
+            WHERE is_active = 1 AND has_filled_questionnaire = 0 AND mailing_subscribed = 1
+            ''')
+        elif filter_type == "recent_week":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company, mailing_subscribed
+            FROM users 
+            WHERE is_active = 1 AND mailing_subscribed = 1 
+            AND date(created_at) >= date('now', '-7 days')
+            ''')
+        elif filter_type == "subscribed":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company, mailing_subscribed
+            FROM users 
+            WHERE is_active = 1 AND mailing_subscribed = 1
+            ''')
+        elif filter_type == "unsubscribed":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company, mailing_subscribed
+            FROM users 
+            WHERE is_active = 1 AND mailing_subscribed = 0
+            ''')
+        else:
+            conn.close()
+            return []
+        
+        users = cursor.fetchall()
+        conn.close()
+        
+        return users
+    
+    def get_all_users_with_subscription(self, limit: int = 50):
+        """Получение всех пользователей с информацией о подписке"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT user_id, username, first_name, last_name, company, 
+               mailing_subscribed, has_filled_questionnaire, created_at
+        FROM users 
+        WHERE is_active = 1
+        ORDER BY created_at DESC
+        LIMIT ?
+        ''', (limit,))
+        
+        users = cursor.fetchall()
+        conn.close()
+        
+        return users
+    
+    # =========== РАБОТА С РАССЫЛКАМИ ===========
     def create_manual_mailing(self, admin_id: int, mailing_text: str, mailing_type: str, filter_criteria: str):
         """Создание ручной рассылки"""
         conn = sqlite3.connect(self.db_name)
@@ -314,6 +446,22 @@ class Database:
         
         return mailing_id
     
+    def save_sent_message(self, mailing_id: int, user_id: int, telegram_message_id: int):
+        """Сохранение отправленного сообщения"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
+        VALUES (?, ?, ?)
+        ''', (mailing_id, user_id, telegram_message_id))
+        
+        conn.commit()
+        message_id = cursor.lastrowid
+        conn.close()
+        
+        return message_id
+    
     def update_mailing_stats(self, mailing_id: int, sent_count: int, failed_count: int):
         """Обновление статистики рассылки"""
         conn = sqlite3.connect(self.db_name)
@@ -328,44 +476,91 @@ class Database:
         conn.commit()
         conn.close()
     
-    def get_users_by_filter(self, filter_type: str):
-        """Получение пользователей по фильтру"""
+    def save_mailing_feedback(self, mailing_id: int, user_id: int, sent_message_id: int, 
+                             feedback_type: str, feedback_text: str = ""):
+        """Сохранение обратной связи по рассылке"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO mailing_feedback 
+        (mailing_id, user_id, sent_message_id, feedback_type, feedback_text)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (mailing_id, user_id, sent_message_id, feedback_type, feedback_text))
+        
+        # Обновляем статистику обратной связи в основной таблице
+        cursor.execute('''
+        UPDATE manual_mailings 
+        SET feedback_count = feedback_count + 1
+        WHERE id = ?
+        ''', (mailing_id,))
+        
+        # Отмечаем сообщение как получившее обратную связь
+        cursor.execute('''
+        UPDATE sent_messages 
+        SET feedback_received = 1
+        WHERE id = ?
+        ''', (sent_message_id,))
+        
+        conn.commit()
+        feedback_id = cursor.lastrowid
+        conn.close()
+        
+        return feedback_id
+    
+    def get_sent_message_by_telegram_id(self, user_id: int, telegram_message_id: int):
+        """Получение отправленного сообщения по ID Telegram"""
         conn = sqlite3.connect(self.db_name)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        if filter_type == "all":
-            cursor.execute('''
-            SELECT user_id, username, first_name, last_name, company 
-            FROM users 
-            WHERE is_active = 1
-            ''')
-        elif filter_type == "with_questionnaire":
-            cursor.execute('''
-            SELECT user_id, username, first_name, last_name, company 
-            FROM users 
-            WHERE is_active = 1 AND has_filled_questionnaire = 1
-            ''')
-        elif filter_type == "without_questionnaire":
-            cursor.execute('''
-            SELECT user_id, username, first_name, last_name, company 
-            FROM users 
-            WHERE is_active = 1 AND has_filled_questionnaire = 0
-            ''')
-        elif filter_type == "recent_week":
-            cursor.execute('''
-            SELECT user_id, username, first_name, last_name, company 
-            FROM users 
-            WHERE is_active = 1 AND date(created_at) >= date('now', '-7 days')
-            ''')
-        else:
-            conn.close()
-            return []
+        cursor.execute('''
+        SELECT sm.*, mm.mailing_text
+        FROM sent_messages sm
+        JOIN manual_mailings mm ON sm.mailing_id = mm.id
+        WHERE sm.user_id = ? AND sm.telegram_message_id = ?
+        ''', (user_id, telegram_message_id))
         
-        users = cursor.fetchall()
+        result = cursor.fetchone()
         conn.close()
         
-        return users
+        return result
+    
+    def get_mailing_feedback(self, mailing_id: int):
+        """Получение обратной связи по рассылке"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT mf.*, u.username, u.first_name, u.last_name
+        FROM mailing_feedback mf
+        JOIN users u ON mf.user_id = u.user_id
+        WHERE mf.mailing_id = ?
+        ORDER BY mf.created_at DESC
+        ''', (mailing_id,))
+        
+        feedback = cursor.fetchall()
+        conn.close()
+        
+        return feedback
+    
+    # =========== ОСТАЛЬНЫЕ МЕТОДЫ ===========
+    def save_manager_message(self, user_id: int, message_type: str, message_text: str, file_id: str = None, file_name: str = None):
+        """Сохранение сообщения менеджеру"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO manager_messages (user_id, message_type, message_text, file_id, file_name)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, message_type, message_text, file_id, file_name))
+        
+        conn.commit()
+        message_id = cursor.lastrowid
+        conn.close()
+        
+        return message_id
     
     def get_statistics(self, days: int = 14):
         """Получение статистики за указанный период"""
@@ -398,11 +593,24 @@ class Database:
         
         # Ручные рассылки
         cursor.execute('''
-        SELECT COUNT(*) as count, SUM(sent_count) as total_sent 
+        SELECT 
+            COUNT(*) as count, 
+            SUM(sent_count) as total_sent,
+            SUM(feedback_count) as total_feedback
         FROM manual_mailings 
         WHERE date(created_at) >= ?
         ''', (start_date,))
         mailings = cursor.fetchone()
+        
+        # Пользователи с подпиской
+        cursor.execute('''
+        SELECT 
+            SUM(CASE WHEN mailing_subscribed = 1 THEN 1 ELSE 0 END) as subscribed,
+            SUM(CASE WHEN mailing_subscribed = 0 THEN 1 ELSE 0 END) as unsubscribed
+        FROM users 
+        WHERE is_active = 1
+        ''')
+        subscriptions = cursor.fetchone()
         
         conn.close()
         
@@ -411,7 +619,10 @@ class Database:
             'exports_completed': exports_completed,
             'manager_messages': manager_messages,
             'mailings_count': mailings['count'] if mailings['count'] else 0,
-            'mailings_sent': mailings['total_sent'] if mailings['total_sent'] else 0
+            'mailings_sent': mailings['total_sent'] if mailings['total_sent'] else 0,
+            'mailings_feedback': mailings['total_feedback'] if mailings['total_feedback'] else 0,
+            'subscribed_users': subscriptions['subscribed'] if subscriptions['subscribed'] else 0,
+            'unsubscribed_users': subscriptions['unsubscribed'] if subscriptions['unsubscribed'] else 0
         }
     
     def is_working_hours(self):
@@ -489,8 +700,9 @@ def get_admin_keyboard():
         keyboard=[
             [KeyboardButton(text="📊 Новые анкеты"), KeyboardButton(text="✅ Отметить выгрузку")],
             [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="📨 Создать рассылку")],
-            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📩 Сообщения менеджеру")],
-            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="👤 Режим пользователя")]
+            [KeyboardButton(text="👥 Управление подписками"), KeyboardButton(text="📩 Сообщения менеджеру")],
+            [KeyboardButton(text="📋 Обратная связь"), KeyboardButton(text="⚙️ Настройки")],
+            [KeyboardButton(text="👤 Режим пользователя")]
         ],
         resize_keyboard=True
     )
@@ -517,13 +729,49 @@ def get_mailing_filters_keyboard():
     """Клавиатура фильтров для рассылки"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="👥 Все пользователи")],
+            [KeyboardButton(text="👥 Все подписанные")],
             [KeyboardButton(text="📝 С анкетами")],
             [KeyboardButton(text="📭 Без анкет")],
             [KeyboardButton(text="🆕 За неделю")],
             [KeyboardButton(text="❌ Отмена")]
         ],
         resize_keyboard=True
+    )
+
+def get_mailing_feedback_keyboard(sent_message_id: int):
+    """Клавиатура для обратной связи по рассылке"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="👍 Понравилось", callback_data=f"feedback_like_{sent_message_id}"),
+                InlineKeyboardButton(text="👎 Не понравилось", callback_data=f"feedback_dislike_{sent_message_id}")
+            ],
+            [
+                InlineKeyboardButton(text="💬 Комментарий", callback_data=f"feedback_comment_{sent_message_id}"),
+                InlineKeyboardButton(text="🚫 Отписаться", callback_data=f"feedback_unsubscribe_{sent_message_id}")
+            ]
+        ]
+    )
+
+def get_subscription_management_keyboard(user_id: int, current_status: bool):
+    """Клавиатура управления подпиской пользователя"""
+    status_text = "✅ Подписан" if current_status else "❌ Отписан"
+    
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text=f"{status_text} - Переключить", 
+                    callback_data=f"toggle_sub_{user_id}"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="📊 Статистика пользователя", 
+                    callback_data=f"user_stats_{user_id}"
+                )
+            ]
+        ]
     )
 
 def get_manager_response_keyboard(message_id: int):
@@ -554,6 +802,9 @@ class ManualMailing(StatesGroup):
     waiting_for_text = State()
     waiting_for_filter = State()
     waiting_for_confirmation = State()
+
+class FeedbackComment(StatesGroup):
+    waiting_for_comment = State()
 
 # =========== ФУНКЦИЯ ОТПРАВКИ АНКЕТЫ АДМИНИСТРАТОРУ ===========
 async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_data: dict, username: str):
@@ -620,9 +871,9 @@ async def send_anketa_file(user_id: int):
                     caption=(
                         "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
                         "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                        "1. 📧 <b>На email:</b> info@tritica.ru\n"
+                        "1. 📧 <b>На email:</b> info@tritika.ru\n"
                         "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                        "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritica_manager\n\n"
+                        "3. 👨‍💼 <b>Менеджеру в Telegram:</b> tritikaru\n\n"
                         "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
                     )
                 )
@@ -637,7 +888,7 @@ async def send_anketa_file(user_id: int):
                     user_id,
                     "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
                     "К сожалению, файл анкеты временно недоступен.\n\n"
-                    "Вы можете заполнить анкету онлайн или отправить запрос на email: info@tritica.ru"
+                    "Вы можете заполнить анкету онлайн или отправить запрос на email: info@tritika.ru"
                 )
                 return False
     except Exception as e:
@@ -691,8 +942,8 @@ async def cmd_help(message: types.Message):
         "• Получить бесплатную подборку тендеров\n"
         "• Консультация по участию в тендерах\n\n"
         "<b>Контакты поддержки:</b>\n"
-        "📧 support@tritica.ru\n"
-        "📱 +7 (XXX) XXX-XX-XX"
+        "📧 info@tritika.ru\n"
+        "📱 +7 (904) 653-69-87"
     )
 
 @dp.message(Command("my_exports"))
@@ -810,16 +1061,16 @@ async def show_contacts(message: types.Message):
     await message.answer(
         "📞 <b>Контакты компании Тритика</b>\n\n"
         "<b>Для клиентов:</b>\n"
-        "• Телефон: +7 (XXX) XXX-XX-XX\n"
-        "• Email: clients@tritica.ru\n"
-        "• Telegram: @tritica_clients\n\n"
+        "• Телефон: +7 (904) 653-69-87\n"
+        "• Email: info@tritika.ru\n"
+        "• Telegram: @tritikaru\n\n"
         "<b>Техническая поддержка:</b>\n"
-        "• Email: support@tritica.ru\n"
-        "• Telegram: @tritica_support\n\n"
+        "• Email: info@tritika\n"
+        "• Telegram: @tritikaru\n\n"
         "<b>Время работы:</b>\n"
-        "Пн-Пт: 9:00-18:00\n"
-        "Сб: 10:00-15:00\n"
-        "Вс: выходной"
+        "Пн-Чт: 8:30-17:30\n"
+        "Пт: 8:30-16:30\n"
+        "Сб-Вс: выходные"
     )
 
 @dp.message(F.text == "ℹ️ Помощь")
@@ -835,7 +1086,8 @@ async def cancel_action(message: types.Message, state: FSMContext):
     if current_state in [ManagerDialog.waiting_for_message, 
                          ManualMailing.waiting_for_text,
                          ManualMailing.waiting_for_filter,
-                         ManualMailing.waiting_for_confirmation]:
+                         ManualMailing.waiting_for_confirmation,
+                         FeedbackComment.waiting_for_comment]:
         await state.clear()
         is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
         
@@ -1178,6 +1430,8 @@ async def show_statistics(message: types.Message):
 
 👥 <b>Пользователи:</b>
 • Новых пользователей: {stats['new_users']}
+• С подпиской: {stats['subscribed_users']}
+• Без подписки: {stats['unsubscribed_users']}
 
 📋 <b>Выгрузки:</b>
 • Выполненных выгрузок: {stats['exports_completed']}
@@ -1188,6 +1442,7 @@ async def show_statistics(message: types.Message):
 📨 <b>Ручные рассылки:</b>
 • Количество рассылок: {stats['mailings_count']}
 • Отправлено сообщений: {stats['mailings_sent']}
+• Получено отзывов: {stats['mailings_feedback']}
 
 📅 <b>Дата отчета:</b>
 {datetime.now().strftime('%d.%m.%Y %H:%M')}
@@ -1195,6 +1450,345 @@ async def show_statistics(message: types.Message):
     
     await message.answer(response)
 
+# =========== УПРАВЛЕНИЕ ПОДПИСКАМИ ===========
+@dp.message(F.text == "👥 Управление подписками")
+async def manage_subscriptions(message: types.Message):
+    """Управление подписками пользователей"""
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    # Получаем пользователей
+    users = db.get_all_users_with_subscription(30)
+    
+    if not users:
+        await message.answer("👥 Пользователей нет")
+        return
+    
+    # Создаем инлайн-клавиатуру для управления
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    for user in users:
+        status_icon = "✅" if user['mailing_subscribed'] else "❌"
+        has_anketa = "📋" if user['has_filled_questionnaire'] else "📭"
+        
+        button_text = f"{status_icon} {has_anketa} {user['first_name']}"
+        if user['last_name']:
+            button_text += f" {user['last_name']}"
+        
+        if user['username']:
+            button_text += f" (@{user['username']})"
+        
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=button_text[:50],  # Ограничиваем длину
+                callback_data=f"manage_user_{user['user_id']}"
+            )
+        ])
+    
+    # Добавляем кнопки фильтров
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="✅ Только подписанные", callback_data="filter_subscribed"),
+        InlineKeyboardButton(text="❌ Только отписанные", callback_data="filter_unsubscribed")
+    ])
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="📊 Статистика подписок", callback_data="subscription_stats"),
+        InlineKeyboardButton(text="🔄 Обновить список", callback_data="refresh_subs")
+    ])
+    
+    await message.answer(
+        "👥 <b>Управление подписками на рассылку</b>\n\n"
+        "Выберите пользователя для управления его подпиской:\n\n"
+        "<b>Легенда:</b>\n"
+        "✅ - подписан на рассылку\n"
+        "❌ - отписан от рассылки\n"
+        "📋 - заполнил анкету\n"
+        "📭 - без анкеты",
+        reply_markup=keyboard
+    )
+
+@dp.callback_query(F.data.startswith("manage_user_"))
+async def handle_manage_user(callback: types.CallbackQuery):
+    """Обработка выбора пользователя для управления подпиской"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    user_id = int(callback.data.split("_")[2])
+    
+    # Получаем информацию о пользователе
+    user_info = db.get_user_mailing_status(user_id)
+    
+    if not user_info:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    keyboard = get_subscription_management_keyboard(user_id, user_info['subscribed'])
+    
+    user_name = f"{user_info['first_name']} {user_info['last_name'] or ''}".strip()
+    username = f"@{user_info['username']}" if user_info['username'] else "без username"
+    
+    await callback.message.edit_text(
+        f"👤 <b>Управление подпиской пользователя</b>\n\n"
+        f"<b>Пользователь:</b> {user_name}\n"
+        f"<b>Username:</b> {username}\n"
+        f"<b>ID:</b> {user_id}\n"
+        f"<b>Текущий статус:</b> {'✅ Подписан на рассылку' if user_info['subscribed'] else '❌ Отписан от рассылки'}\n\n"
+        f"<i>Используйте кнопки ниже для управления:</i>",
+        reply_markup=keyboard
+    )
+    
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("toggle_sub_"))
+async def handle_toggle_subscription(callback: types.CallbackQuery):
+    """Переключение статуса подписки"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    user_id = int(callback.data.split("_")[2])
+    
+    # Переключаем подписку
+    new_status = db.toggle_user_mailing_subscription(user_id)
+    
+    if new_status is None:
+        await callback.answer("Ошибка при изменении подписки", show_alert=True)
+        return
+    
+    # Получаем обновленную информацию
+    user_info = db.get_user_mailing_status(user_id)
+    
+    if not user_info:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    keyboard = get_subscription_management_keyboard(user_id, new_status)
+    
+    user_name = f"{user_info['first_name']} {user_info['last_name'] or ''}".strip()
+    
+    # Обновляем сообщение
+    await callback.message.edit_text(
+        f"👤 <b>Управление подпиской пользователя</b>\n\n"
+        f"<b>Пользователь:</b> {user_name}\n"
+        f"<b>ID:</b> {user_id}\n"
+        f"<b>Текущий статус:</b> {'✅ Подписан на рассылку' if new_status else '❌ Отписан от рассылки'}\n\n"
+        f"<i>Статус успешно обновлен!</i>",
+        reply_markup=keyboard
+    )
+    
+    await callback.answer(f"Статус подписки изменен: {'✅ Подписан' if new_status else '❌ Отписан'}")
+
+@dp.callback_query(F.data.startswith("user_stats_"))
+async def handle_user_stats(callback: types.CallbackQuery):
+    """Показать статистику пользователя"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    user_id = int(callback.data.split("_")[2])
+    
+    # Получаем статистику пользователя
+    conn = sqlite3.connect("tenders.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Информация о пользователе
+    cursor.execute('''
+    SELECT u.*, 
+           COUNT(DISTINCT q.id) as questionnaire_count,
+           COUNT(DISTINCT te.id) as export_count,
+           COUNT(DISTINCT mm.id) as message_count,
+           COUNT(DISTINCT mf.id) as feedback_count
+    FROM users u
+    LEFT JOIN questionnaires q ON u.user_id = q.user_id
+    LEFT JOIN tender_exports te ON q.id = te.questionnaire_id
+    LEFT JOIN manager_messages mm ON u.user_id = mm.user_id
+    LEFT JOIN mailing_feedback mf ON u.user_id = mf.user_id
+    WHERE u.user_id = ?
+    GROUP BY u.user_id
+    ''', (user_id,))
+    
+    user = cursor.fetchone()
+    conn.close()
+    
+    if not user:
+        await callback.answer("Пользователь не найден", show_alert=True)
+        return
+    
+    user_name = f"{user['first_name']} {user['last_name'] or ''}".strip()
+    username = f"@{user['username']}" if user['username'] else "без username"
+    
+    # Получаем последние отзывы
+    feedback = db.get_mailing_feedback_for_user(user_id)
+    
+    response = f"""
+📊 <b>Статистика пользователя</b>
+
+👤 <b>Пользователь:</b> {user_name}
+📱 <b>Username:</b> {username}
+🆔 <b>ID:</b> {user_id}
+
+<b>Статусы:</b>
+• Подписка на рассылку: {'✅ Подписан' if user['mailing_subscribed'] else '❌ Отписан'}
+• Заполнил анкету: {'✅ Да' if user['has_filled_questionnaire'] else '❌ Нет'}
+• Активен: {'✅ Да' if user['is_active'] else '❌ Нет'}
+
+<b>Активность:</b>
+• Анкет: {user['questionnaire_count']}
+• Выгрузок: {user['export_count']}
+• Сообщений менеджеру: {user['message_count']}
+• Отзывов на рассылки: {user['feedback_count']}
+
+<b>Контактные данные:</b>
+• Телефон: {user['phone'] or 'Не указан'}
+• Email: {user['email'] or 'Не указан'}
+• Компания: {user['company'] or 'Не указана'}
+
+<b>Дата регистрации:</b>
+{user['created_at'][:19] if user['created_at'] else 'Неизвестно'}
+"""
+    
+    if feedback:
+        response += "\n<b>Последние отзывы:</b>\n"
+        for i, fb in enumerate(feedback[:3], 1):
+            fb_type = "👍" if fb['feedback_type'] == 'like' else "👎" if fb['feedback_type'] == 'dislike' else "💬" if fb['feedback_type'] == 'comment' else "🚫"
+            response += f"{i}. {fb_type} {fb['feedback_text'] or fb['feedback_type']} ({fb['created_at'][:16]})\n"
+    
+    await callback.message.answer(response)
+    await callback.answer()
+
+@dp.callback_query(F.data == "subscription_stats")
+async def handle_subscription_stats(callback: types.CallbackQuery):
+    """Статистика подписок"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    conn = sqlite3.connect("tenders.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Общая статистика
+    cursor.execute('''
+    SELECT 
+        COUNT(*) as total_users,
+        SUM(CASE WHEN mailing_subscribed = 1 THEN 1 ELSE 0 END) as subscribed,
+        SUM(CASE WHEN mailing_subscribed = 0 THEN 1 ELSE 0 END) as unsubscribed,
+        SUM(CASE WHEN has_filled_questionnaire = 1 THEN 1 ELSE 0 END) as with_anketa,
+        SUM(CASE WHEN has_filled_questionnaire = 0 THEN 1 ELSE 0 END) as without_anketa
+    FROM users 
+    WHERE is_active = 1
+    ''')
+    
+    stats = cursor.fetchone()
+    
+    # Статистика по отпискам за последний месяц
+    cursor.execute('''
+    SELECT COUNT(*) as recent_unsubscribes
+    FROM mailing_feedback 
+    WHERE feedback_type = 'unsubscribe'
+    AND date(created_at) >= date('now', '-30 days')
+    ''')
+    
+    recent = cursor.fetchone()
+    
+    conn.close()
+    
+    percentage = (stats['subscribed'] / stats['total_users'] * 100) if stats['total_users'] > 0 else 0
+    
+    response = f"""
+📊 <b>Статистика подписок</b>
+
+<b>Общая статистика:</b>
+• Всего активных пользователей: {stats['total_users']}
+• Подписано на рассылку: {stats['subscribed']}
+• Отписано от рассылки: {stats['unsubscribed']}
+• Процент подписки: {percentage:.1f}%
+
+<b>По анкетам:</b>
+• С заполненной анкетой: {stats['with_anketa']}
+• Без анкеты: {stats['without_anketa']}
+
+<b>Отписки за 30 дней:</b>
+• Всего отписок: {recent['recent_unsubscribes']}
+"""
+    
+    await callback.message.answer(response)
+    await callback.answer()
+
+@dp.callback_query(F.data == "refresh_subs")
+async def handle_refresh_subs(callback: types.CallbackQuery):
+    """Обновление списка подписок"""
+    await manage_subscriptions(callback.message)
+    await callback.answer("Список обновлен")
+
+@dp.callback_query(F.data.startswith("filter_"))
+async def handle_filter_subs(callback: types.CallbackQuery):
+    """Фильтрация списка подписок"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    filter_type = callback.data.split("_")[1]
+    
+    # Получаем пользователей по фильтру
+    if filter_type == "subscribed":
+        users = db.get_users_by_filter("subscribed")
+        filter_name = "подписанные"
+    elif filter_type == "unsubscribed":
+        users = db.get_users_by_filter("unsubscribed")
+        filter_name = "отписанные"
+    else:
+        users = db.get_all_users_with_subscription(30)
+        filter_name = "все"
+    
+    if not users:
+        await callback.answer(f"Нет пользователей с фильтром '{filter_name}'", show_alert=True)
+        return
+    
+    # Создаем инлайн-клавиатуру
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
+    
+    for user in users:
+        status_icon = "✅" if user['mailing_subscribed'] else "❌"
+        has_anketa = "📋" if user['has_filled_questionnaire'] else "📭"
+        
+        button_text = f"{status_icon} {has_anketa} {user['first_name']}"
+        if user['last_name']:
+            button_text += f" {user['last_name']}"
+        
+        if user['username']:
+            button_text += f" (@{user['username']})"
+        
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=button_text[:50],
+                callback_data=f"manage_user_{user['user_id']}"
+            )
+        ])
+    
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="👥 Все пользователи", callback_data="filter_all"),
+        InlineKeyboardButton(text="🔄 Обновить список", callback_data="refresh_subs")
+    ])
+    
+    await callback.message.edit_text(
+        f"👥 <b>Управление подписками на рассылку</b>\n\n"
+        f"<b>Фильтр:</b> {filter_name}\n"
+        f"<b>Найдено пользователей:</b> {len(users)}\n\n"
+        "<b>Легенда:</b>\n"
+        "✅ - подписан на рассылку\n"
+        "❌ - отписан от рассылки\n"
+        "📋 - заполнил анкету\n"
+        "📭 - без анкеты",
+        reply_markup=keyboard
+    )
+    
+    await callback.answer()
+
+# =========== СОЗДАНИЕ РАССЫЛКИ ===========
 @dp.message(F.text == "📨 Создать рассылку")
 async def start_create_mailing(message: types.Message, state: FSMContext):
     """Начало создания ручной рассылки"""
@@ -1238,7 +1832,7 @@ async def process_mailing_filter(message: types.Message, state: FSMContext):
         return
     
     filter_map = {
-        "👥 Все пользователи": "all",
+        "👥 Все подписанные": "all",
         "📝 С анкетами": "with_questionnaire",
         "📭 Без анкет": "without_questionnaire",
         "🆕 За неделю": "recent_week"
@@ -1286,7 +1880,7 @@ async def process_mailing_filter(message: types.Message, state: FSMContext):
 
 @dp.message(ManualMailing.waiting_for_confirmation)
 async def process_mailing_confirmation(message: types.Message, state: FSMContext):
-    """Подтверждение и отправка рассылки"""
+    """Подтверждение и отправка рассылки С ОБРАТНОЙ СВЯЗЬЮ"""
     if message.text == "❌ Нет, отменить":
         await state.clear()
         await message.answer("❌ Рассылка отменена.", reply_markup=get_admin_keyboard())
@@ -1325,11 +1919,29 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
     
     for user in users:
         try:
-            await bot.send_message(user['user_id'], mailing_text, parse_mode=ParseMode.HTML)
+            # Отправляем сообщение с клавиатурой для обратной связи
+            sent_message = await bot.send_message(
+                user['user_id'], 
+                mailing_text, 
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Сохраняем отправленное сообщение
+            sent_message_id = db.save_sent_message(mailing_id, user['user_id'], sent_message.message_id)
+            
+            # Отправляем клавиатуру для обратной связи отдельным сообщением
+            feedback_keyboard = get_mailing_feedback_keyboard(sent_message_id)
+            await bot.send_message(
+                user['user_id'],
+                "💬 <b>Как вам эта рассылка?</b>\n\n"
+                "Пожалуйста, оставьте обратную связь:",
+                reply_markup=feedback_keyboard
+            )
+            
             success_count += 1
             
             # Пауза, чтобы не превысить лимиты Telegram
-            await asyncio.sleep(0.05)
+            await asyncio.sleep(0.1)
             
         except Exception as e:
             logger.error(f"Не удалось отправить рассылку пользователю {user['user_id']}: {e}")
@@ -1344,15 +1956,192 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
         f"👥 <b>Всего пользователей:</b> {len(users)}\n"
         f"✅ <b>Успешно отправлено:</b> {success_count}\n"
         f"❌ <b>Не удалось отправить:</b> {failed_count}\n\n"
-        f"<i>Рассылка сохранена в истории.</i>",
+        f"<i>Рассылка сохранена в истории. Пользователи получили возможность оставить обратную связь.</i>",
         reply_markup=get_admin_keyboard()
     )
     
     await state.clear()
 
-@dp.message(F.text == "👥 Пользователи")
-async def show_all_users(message: types.Message):
-    """Показать всех пользователей"""
+# =========== ОБРАТНАЯ СВЯЗЬ ПО РАССЫЛКАМ ===========
+@dp.callback_query(F.data.startswith("feedback_"))
+async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMContext):
+    """Обработка обратной связи по рассылке"""
+    try:
+        # Парсим callback data
+        parts = callback.data.split("_")
+        feedback_type = parts[1]  # like, dislike, comment, unsubscribe
+        sent_message_id = int(parts[2])
+        
+        user_id = callback.from_user.id
+        username = callback.from_user.username or "без username"
+        
+        # Получаем информацию о сообщении
+        conn = sqlite3.connect("tenders.db")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT sm.*, mm.mailing_text, mm.id as mailing_id
+        FROM sent_messages sm
+        JOIN manual_mailings mm ON sm.mailing_id = mm.id
+        WHERE sm.id = ? AND sm.user_id = ?
+        ''', (sent_message_id, user_id))
+        
+        sent_message = cursor.fetchone()
+        conn.close()
+        
+        if not sent_message:
+            await callback.answer("Сообщение не найдено", show_alert=True)
+            return
+        
+        mailing_id = sent_message['mailing_id']
+        
+        if feedback_type == "unsubscribe":
+            # Отписываем пользователя
+            db.toggle_user_mailing_subscription(user_id)
+            
+            # Сохраняем отзыв
+            db.save_mailing_feedback(
+                mailing_id, 
+                user_id, 
+                sent_message_id, 
+                "unsubscribe", 
+                "Пользователь отписался от рассылки"
+            )
+            
+            # Уведомляем пользователя
+            await callback.message.edit_text(
+                callback.message.text + "\n\n✅ <b>Вы отписаны от рассылок</b>",
+                reply_markup=None
+            )
+            
+            await callback.answer("Вы отписаны от рассылок")
+            
+            # Уведомляем администратора
+            if ADMIN_ID:
+                try:
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"🚫 <b>ПОЛЬЗОВАТЕЛЬ ОТПИСАЛСЯ ОТ РАССЫЛКИ</b>\n\n"
+                        f"👤 Пользователь: @{username}\n"
+                        f"🆔 ID: {user_id}\n"
+                        f"📨 Рассылка ID: {mailing_id}\n"
+                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить админа об отписке: {e}")
+            
+            return
+        
+        elif feedback_type == "comment":
+            # Запрашиваем комментарий
+            await state.set_state(FeedbackComment.waiting_for_comment)
+            await state.update_data(sent_message_id=sent_message_id, mailing_id=mailing_id)
+            
+            await callback.message.answer(
+                "💬 <b>Напишите ваш комментарий к рассылке:</b>\n\n"
+                "<i>Что понравилось или не понравилось? Что можно улучшить?</i>",
+                reply_markup=get_cancel_keyboard()
+            )
+            
+            await callback.answer()
+            return
+        
+        else:  # like или dislike
+            feedback_text_map = {
+                "like": "Понравилось",
+                "dislike": "Не понравилось"
+            }
+            
+            # Сохраняем отзыв
+            db.save_mailing_feedback(
+                mailing_id, 
+                user_id, 
+                sent_message_id, 
+                feedback_type, 
+                feedback_text_map.get(feedback_type, "")
+            )
+            
+            # Обновляем сообщение
+            feedback_icon = "👍" if feedback_type == "like" else "👎"
+            await callback.message.edit_text(
+                callback.message.text + f"\n\n{feedback_icon} <b>Спасибо за ваш отзыв!</b>",
+                reply_markup=None
+            )
+            
+            await callback.answer(f"Спасибо за ваш отзыв: {feedback_text_map.get(feedback_type, '')}")
+            
+            # Уведомляем администратора
+            if ADMIN_ID:
+                try:
+                    feedback_type_text = "Понравилось" if feedback_type == "like" else "Не понравилось"
+                    
+                    await bot.send_message(
+                        ADMIN_ID,
+                        f"{feedback_icon} <b>НОВЫЙ ОТЗЫВ НА РАССЫЛКУ</b>\n\n"
+                        f"👤 Пользователь: @{username}\n"
+                        f"🆔 ID: {user_id}\n"
+                        f"📨 Рассылка ID: {mailing_id}\n"
+                        f"💬 Отзыв: {feedback_type_text}\n"
+                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+                    )
+                except Exception as e:
+                    logger.error(f"Не удалось уведомить админа об отзыве: {e}")
+    
+    except Exception as e:
+        logger.error(f"Ошибка обработки обратной связи: {e}")
+        await callback.answer("Произошла ошибка", show_alert=True)
+
+@dp.message(FeedbackComment.waiting_for_comment)
+async def process_feedback_comment(message: types.Message, state: FSMContext):
+    """Обработка комментария к рассылке"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Отправка комментария отменена.", reply_markup=get_main_keyboard())
+        return
+    
+    data = await state.get_data()
+    sent_message_id = data.get('sent_message_id')
+    mailing_id = data.get('mailing_id')
+    user_id = message.from_user.id
+    username = message.from_user.username or "без username"
+    
+    # Сохраняем комментарий
+    db.save_mailing_feedback(
+        mailing_id, 
+        user_id, 
+        sent_message_id, 
+        "comment", 
+        message.text
+    )
+    
+    await message.answer(
+        "💬 <b>Спасибо за ваш комментарий!</b>\n\n"
+        "Мы учтем ваше мнение для улучшения наших рассылок.",
+        reply_markup=get_main_keyboard()
+    )
+    
+    # Уведомляем администратора
+    if ADMIN_ID:
+        try:
+            await bot.send_message(
+                ADMIN_ID,
+                f"💬 <b>НОВЫЙ КОММЕНТАРИЙ К РАССЫЛКЕ</b>\n\n"
+                f"👤 Пользователь: @{username}\n"
+                f"🆔 ID: {user_id}\n"
+                f"📨 Рассылка ID: {mailing_id}\n"
+                f"📝 Комментарий: {message.text[:500]}\n"
+                f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+            )
+        except Exception as e:
+            logger.error(f"Не удалось уведомить админа о комментарии: {e}")
+    
+    await state.clear()
+
+# =========== ПРОСМОТР ОБРАТНОЙ СВЯЗИ ===========
+@dp.message(F.text == "📋 Обратная связь")
+async def show_feedback(message: types.Message):
+    """Показать обратную связь по рассылкам"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Доступ запрещен")
         return
@@ -1361,43 +2150,182 @@ async def show_all_users(message: types.Message):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
+    # Получаем последние рассылки с обратной связью
     cursor.execute('''
-    SELECT u.*, 
-           COUNT(DISTINCT q.id) as questionnaire_count,
-           COUNT(DISTINCT te.id) as export_count,
-           COUNT(DISTINCT mm.id) as message_count
-    FROM users u
-    LEFT JOIN questionnaires q ON u.user_id = q.user_id
-    LEFT JOIN tender_exports te ON q.id = te.questionnaire_id
-    LEFT JOIN manager_messages mm ON u.user_id = mm.user_id
-    GROUP BY u.user_id
-    ORDER BY u.created_at DESC
-    LIMIT 20
+    SELECT mm.id, mm.mailing_text, mm.created_at, 
+           mm.sent_count, mm.feedback_count,
+           (SELECT COUNT(DISTINCT mf.user_id) 
+            FROM mailing_feedback mf 
+            WHERE mf.mailing_id = mm.id) as feedback_users
+    FROM manual_mailings mm
+    WHERE mm.sent_count > 0
+    ORDER BY mm.created_at DESC
+    LIMIT 10
     ''')
     
-    users = cursor.fetchall()
+    mailings = cursor.fetchall()
     conn.close()
     
-    if not users:
-        await message.answer("👥 Пользователей нет")
+    if not mailings:
+        await message.answer("📭 Нет рассылок с обратной связью")
         return
     
-    response = "👥 <b>Последние пользователи (20):</b>\n\n"
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     
-    for i, user in enumerate(users, 1):
-        date_str = user['created_at'][:10] if user['created_at'] else "??.??.????"
-        has_anketa = "✅" if user['has_filled_questionnaire'] else "❌"
+    for mailing in mailings:
+        date_str = mailing['created_at'][:10] if mailing['created_at'] else "??.??.????"
+        feedback_percent = (mailing['feedback_count'] / mailing['sent_count'] * 100) if mailing['sent_count'] > 0 else 0
         
-        response += f"{i}. <b>@{user['username'] or 'без username'}</b>\n"
-        response += f"   🆔 ID: {user['user_id']}\n"
-        response += f"   👤 {user['first_name']} {user['last_name'] or ''}\n"
-        response += f"   📋 Анкета: {has_anketa}\n"
-        response += f"   📤 Выгрузок: {user['export_count']}\n"
-        response += f"   💬 Сообщений: {user['message_count']}\n"
-        response += f"   📅 Регистрация: {date_str}\n\n"
+        button_text = f"📨 #{mailing['id']} ({date_str}) - {feedback_percent:.1f}% отзывов"
+        keyboard.inline_keyboard.append([
+            InlineKeyboardButton(
+                text=button_text,
+                callback_data=f"view_feedback_{mailing['id']}"
+            )
+        ])
     
-    await message.answer(response)
+    keyboard.inline_keyboard.append([
+        InlineKeyboardButton(text="📊 Статистика отзывов", callback_data="feedback_stats"),
+        InlineKeyboardButton(text="🔄 Обновить", callback_data="refresh_feedback")
+    ])
+    
+    await message.answer(
+        "📋 <b>Обратная связь по рассылкам</b>\n\n"
+        "Выберите рассылку для просмотра отзывов:",
+        reply_markup=keyboard
+    )
 
+@dp.callback_query(F.data.startswith("view_feedback_"))
+async def handle_view_feedback(callback: types.CallbackQuery):
+    """Просмотр обратной связи по конкретной рассылке"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    mailing_id = int(callback.data.split("_")[2])
+    
+    # Получаем обратную связь
+    feedback = db.get_mailing_feedback(mailing_id)
+    
+    if not feedback:
+        await callback.answer("Нет обратной связи по этой рассылке", show_alert=True)
+        return
+    
+    # Статистика по типам отзывов
+    likes = sum(1 for f in feedback if f['feedback_type'] == 'like')
+    dislikes = sum(1 for f in feedback if f['feedback_type'] == 'dislike')
+    comments = sum(1 for f in feedback if f['feedback_type'] == 'comment')
+    unsubscribes = sum(1 for f in feedback if f['feedback_type'] == 'unsubscribe')
+    
+    response = f"""
+📋 <b>Обратная связь по рассылке #{mailing_id}</b>
+
+<b>Статистика:</b>
+• Всего отзывов: {len(feedback)}
+• 👍 Понравилось: {likes}
+• 👎 Не понравилось: {dislikes}
+• 💬 Комментарии: {comments}
+• 🚫 Отписки: {unsubscribes}
+
+<b>Последние отзывы:</b>
+"""
+    
+    for i, fb in enumerate(feedback[:10], 1):
+        fb_type = "👍" if fb['feedback_type'] == 'like' else "👎" if fb['feedback_type'] == 'dislike' else "💬" if fb['feedback_type'] == 'comment' else "🚫"
+        user_name = f"@{fb['username']}" if fb['username'] else f"{fb['first_name']} {fb['last_name'] or ''}"
+        date_str = fb['created_at'][:16] if fb['created_at'] else "??.?? ??:??"
+        
+        response += f"\n{i}. {fb_type} <b>{user_name}</b> ({date_str})"
+        if fb['feedback_text']:
+            response += f"\n   {fb['feedback_text'][:100]}..."
+    
+    if len(feedback) > 10:
+        response += f"\n\n... и еще {len(feedback) - 10} отзывов"
+    
+    await callback.message.answer(response)
+    await callback.answer()
+
+@dp.callback_query(F.data == "feedback_stats")
+async def handle_feedback_stats(callback: types.CallbackQuery):
+    """Статистика обратной связи"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    conn = sqlite3.connect("tenders.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    # Общая статистика
+    cursor.execute('''
+    SELECT 
+        COUNT(*) as total_feedback,
+        SUM(CASE WHEN feedback_type = 'like' THEN 1 ELSE 0 END) as likes,
+        SUM(CASE WHEN feedback_type = 'dislike' THEN 1 ELSE 0 END) as dislikes,
+        SUM(CASE WHEN feedback_type = 'comment' THEN 1 ELSE 0 END) as comments,
+        SUM(CASE WHEN feedback_type = 'unsubscribe' THEN 1 ELSE 0 END) as unsubscribes
+    FROM mailing_feedback
+    ''')
+    
+    stats = cursor.fetchone()
+    
+    # Статистика за 30 дней
+    cursor.execute('''
+    SELECT 
+        COUNT(*) as recent_feedback,
+        SUM(CASE WHEN feedback_type = 'unsubscribe' THEN 1 ELSE 0 END) as recent_unsubscribes
+    FROM mailing_feedback 
+    WHERE date(created_at) >= date('now', '-30 days')
+    ''')
+    
+    recent = cursor.fetchone()
+    
+    # Самые популярные рассылки
+    cursor.execute('''
+    SELECT mm.id, mm.mailing_text, COUNT(mf.id) as feedback_count
+    FROM manual_mailings mm
+    LEFT JOIN mailing_feedback mf ON mm.id = mf.mailing_id
+    GROUP BY mm.id
+    ORDER BY feedback_count DESC
+    LIMIT 5
+    ''')
+    
+    popular = cursor.fetchall()
+    
+    conn.close()
+    
+    response = f"""
+📊 <b>Статистика обратной связи</b>
+
+<b>Общая статистика:</b>
+• Всего отзывов: {stats['total_feedback'] or 0}
+• 👍 Понравилось: {stats['likes'] or 0}
+• 👎 Не понравилось: {stats['dislikes'] or 0}
+• 💬 Комментарии: {stats['comments'] or 0}
+• 🚫 Отписки: {stats['unsubscribes'] or 0}
+
+<b>За последние 30 дней:</b>
+• Новых отзывов: {recent['recent_feedback'] or 0}
+• Отписок: {recent['recent_unsubscribes'] or 0}
+
+<b>Самые обсуждаемые рассылки:</b>
+"""
+    
+    for i, mailing in enumerate(popular, 1):
+        mailing_text_preview = mailing['mailing_text'][:50] + "..." if len(mailing['mailing_text']) > 50 else mailing['mailing_text']
+        response += f"\n{i}. ID#{mailing['id']}: {mailing_text_preview}"
+        response += f"\n   Отзывов: {mailing['feedback_count']}"
+    
+    await callback.message.answer(response)
+    await callback.answer()
+
+@dp.callback_query(F.data == "refresh_feedback")
+async def handle_refresh_feedback(callback: types.CallbackQuery):
+    """Обновление списка обратной связи"""
+    await show_feedback(callback.message)
+    await callback.answer("Список обновлен")
+
+# =========== ОСТАЛЬНЫЕ АДМИН ФУНКЦИИ ===========
 @dp.message(F.text == "📩 Сообщения менеджеру")
 async def show_manager_messages(message: types.Message):
     """Показать сообщения менеджеру"""
@@ -1445,16 +2373,25 @@ async def show_settings(message: types.Message):
         await message.answer("⛔ Доступ запрещен")
         return
     
+    stats = db.get_statistics(7)
+    
     await message.answer(
         "⚙️ <b>Настройки бота:</b>\n\n"
         "<b>Текущие параметры:</b>\n"
         f"• Время работы: {WORK_START_HOUR}:00-{WORK_END_HOUR}:00 Пн-Пт\n"
         f"• Follow-up через: 1 час\n"
         f"• ID администратора: {ADMIN_ID}\n\n"
+        "<b>Статистика за неделю:</b>\n"
+        f"• Новых пользователей: {stats['new_users']}\n"
+        f"• Пользователей с подпиской: {stats['subscribed_users']}\n"
+        f"• Пользователей без подписки: {stats['unsubscribed_users']}\n"
+        f"• Получено отзывов: {stats['mailings_feedback']}\n\n"
         "<b>Функции:</b>\n"
         "✅ Отправка анкет в Word\n"
-        "✅ Диалог с менеджеру\n"
-        "✅ Ручные рассылки\n"
+        "✅ Диалог с менеджером\n"
+        "✅ Ручные рассылки с обратной связью\n"
+        "✅ Управление подписками\n"
+        "✅ Просмотр обратной связи\n"
         "✅ Автоматические отчеты\n\n"
         "<i>Для изменения настроек обратитесь к разработчику</i>"
     )
