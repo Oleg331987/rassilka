@@ -8,10 +8,10 @@ import os
 import asyncio
 import logging
 import sqlite3
+import tempfile
 from datetime import datetime, timedelta
 from typing import Optional, List, Dict, Any
 import json
-import random
 
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
@@ -69,7 +69,6 @@ class Database:
     def __init__(self, db_name="tenders.db"):
         self.db_name = db_name
         self.init_db()
-        self.init_mailing_topics()
     
     def init_db(self):
         """Инициализация базы данных"""
@@ -88,7 +87,9 @@ class Database:
             email TEXT,
             company TEXT,
             activity TEXT,
+            region TEXT,
             is_active BOOLEAN DEFAULT 1,
+            has_filled_questionnaire BOOLEAN DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_mailing_date TIMESTAMP
         )
@@ -129,99 +130,39 @@ class Database:
         )
         ''')
         
-        # Рассылки
+        # Рассылки (ручные)
         cursor.execute('''
-        CREATE TABLE IF NOT EXISTS mailings (
+        CREATE TABLE IF NOT EXISTS manual_mailings (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            topic_id INTEGER,
-            message_text TEXT,
-            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            opened BOOLEAN DEFAULT 0,
-            responded BOOLEAN DEFAULT 0,
-            response_text TEXT,
-            clicked_link BOOLEAN DEFAULT 0
-        )
-        ''')
-        
-        # Темы для рассылок
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS mailing_topics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            title TEXT,
-            message_text TEXT,
-            link TEXT,
-            question TEXT,
-            delay_days INTEGER DEFAULT 3,
-            is_active BOOLEAN DEFAULT 1,
-            order_num INTEGER
-        )
-        ''')
-        
-        # Ответы на рассылки
-        cursor.execute('''
-        CREATE TABLE IF NOT EXISTS mailing_responses (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            mailing_id INTEGER,
-            user_id INTEGER,
-            response_text TEXT,
+            admin_id INTEGER,
+            mailing_text TEXT,
+            mailing_type TEXT,
+            filter_criteria TEXT,
+            sent_count INTEGER DEFAULT 0,
+            failed_count INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            processed BOOLEAN DEFAULT 0
+            sent_at TIMESTAMP
+        )
+        ''')
+        
+        # Сообщения менеджеру
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS manager_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            message_type TEXT,
+            message_text TEXT,
+            file_id TEXT,
+            file_name TEXT,
+            admin_notified BOOLEAN DEFAULT 0,
+            processed BOOLEAN DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
         ''')
         
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована")
-    
-    def init_mailing_topics(self):
-        """Инициализация тем для рассылок"""
-        topics = [
-            {
-                'title': 'Пропущенные тендеры',
-                'message_text': 'Здравствуйте! А вы знаете, что даже опытные специалисты пропускают выгодные тендеры?',
-                'link': 'https://tritica.ru/articles/missed-tenders',
-                'question': 'Вы сталкивались с такой ситуацией? Поделитесь в ответе — какие сложности испытываете при поиске тендеров?',
-                'delay_days': 3,
-                'order_num': 1
-            },
-            {
-                'title': 'Эффективные стратегии',
-                'message_text': 'Как увеличить шансы на победу в тендере с первого раза?',
-                'link': 'https://tritica.ru/articles/winning-strategies',
-                'question': 'Какие методы вы уже пробовали?',
-                'delay_days': 3,
-                'order_num': 2
-            },
-            {
-                'title': 'Новые возможности',
-                'message_text': 'Открылись новые площадки для поиска тендеров в вашем регионе',
-                'link': 'https://tritica.ru/articles/new-platforms',
-                'question': 'На каких площадках вы обычно ищете тендеры?',
-                'delay_days': 3,
-                'order_num': 3
-            }
-        ]
-        
-        conn = sqlite3.connect(self.db_name)
-        cursor = conn.cursor()
-        
-        for topic in topics:
-            cursor.execute('''
-                INSERT OR IGNORE INTO mailing_topics 
-                (title, message_text, link, question, delay_days, order_num)
-                VALUES (?, ?, ?, ?, ?, ?)
-            ''', (
-                topic['title'],
-                topic['message_text'],
-                topic['link'],
-                topic['question'],
-                topic['delay_days'],
-                topic['order_num']
-            ))
-        
-        conn.commit()
-        conn.close()
     
     def add_user(self, user_id: int, username: str, first_name: str, last_name: str = ""):
         """Добавление пользователя"""
@@ -260,32 +201,25 @@ class Database:
         
         conn.commit()
         last_id = cursor.lastrowid
-        conn.close()
         
-        # Обновляем данные пользователя
-        self.update_user_info(user_id, data)
-        
-        return last_id
-    
-    def update_user_info(self, user_id: int, data: dict):
-        """Обновление информации о пользователе"""
-        conn = sqlite3.connect(self.db_name)
-        cursor = conn.cursor()
-        
+        # Обновляем статус пользователя
         cursor.execute('''
         UPDATE users 
-        SET phone = ?, email = ?, company = ?, activity = ?
+        SET phone = ?, email = ?, company = ?, activity = ?, region = ?, has_filled_questionnaire = 1
         WHERE user_id = ?
         ''', (
             data.get('phone'),
             data.get('email'),
             data.get('company_name'),
             data.get('activity'),
+            data.get('region'),
             user_id
         ))
         
         conn.commit()
         conn.close()
+        
+        return last_id
     
     def create_tender_export(self, questionnaire_id: int, user_id: int):
         """Создание записи о выгрузке тендеров"""
@@ -320,66 +254,31 @@ class Database:
         conn.commit()
         conn.close()
     
-    def schedule_follow_up(self, export_id: int):
-        """Планирование follow-up сообщения"""
+    def save_manager_message(self, user_id: int, message_type: str, message_text: str, file_id: str = None, file_name: str = None):
+        """Сохранение сообщения менеджеру"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
-        follow_up_at = datetime.now() + timedelta(hours=1)
-        if not self.is_working_hours():
-            follow_up_at = self.get_next_working_time()
-        
         cursor.execute('''
-        UPDATE tender_exports 
-        SET follow_up_at = ?
-        WHERE id = ?
-        ''', (follow_up_at, export_id))
+        INSERT INTO manager_messages (user_id, message_type, message_text, file_id, file_name)
+        VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, message_type, message_text, file_id, file_name))
         
         conn.commit()
+        message_id = cursor.lastrowid
         conn.close()
+        
+        return message_id
     
-    def save_follow_up_response(self, export_id: int, response: str):
-        """Сохранение ответа на follow-up"""
+    def create_manual_mailing(self, admin_id: int, mailing_text: str, mailing_type: str, filter_criteria: str):
+        """Создание ручной рассылки"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
         cursor.execute('''
-        UPDATE tender_exports 
-        SET follow_up_sent = 1, follow_up_response = ?
-        WHERE id = ?
-        ''', (response, export_id))
-        
-        conn.commit()
-        conn.close()
-    
-    def get_pending_follow_ups(self):
-        """Получение запланированных follow-up сообщений"""
-        conn = sqlite3.connect(self.db_name)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        SELECT te.*, u.user_id, u.username, u.first_name
-        FROM tender_exports te
-        JOIN users u ON te.user_id = u.user_id
-        WHERE te.status = 'completed' 
-        AND te.follow_up_sent = 0
-        AND te.follow_up_at <= datetime('now')
-        ''')
-        
-        results = cursor.fetchall()
-        conn.close()
-        return results
-    
-    def create_mailing(self, user_id: int, topic_id: int, message_text: str):
-        """Создание рассылки"""
-        conn = sqlite3.connect(self.db_name)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT INTO mailings (user_id, topic_id, message_text)
-        VALUES (?, ?, ?)
-        ''', (user_id, topic_id, message_text))
+        INSERT INTO manual_mailings (admin_id, mailing_text, mailing_type, filter_criteria)
+        VALUES (?, ?, ?, ?)
+        ''', (admin_id, mailing_text, mailing_type, filter_criteria))
         
         conn.commit()
         mailing_id = cursor.lastrowid
@@ -387,99 +286,58 @@ class Database:
         
         return mailing_id
     
-    def get_next_mailing_topic(self, user_id: int):
-        """Получение следующей темы для рассылки"""
+    def update_mailing_stats(self, mailing_id: int, sent_count: int, failed_count: int):
+        """Обновление статистики рассылки"""
         conn = sqlite3.connect(self.db_name)
-        conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # Получаем последнюю рассылку пользователю
         cursor.execute('''
-        SELECT topic_id FROM mailings 
-        WHERE user_id = ? 
-        ORDER BY sent_at DESC 
-        LIMIT 1
-        ''', (user_id,))
+        UPDATE manual_mailings 
+        SET sent_count = ?, failed_count = ?, sent_at = datetime('now')
+        WHERE id = ?
+        ''', (sent_count, failed_count, mailing_id))
         
-        last_topic = cursor.fetchone()
-        
-        if last_topic:
-            # Берем следующую тему по порядку
-            cursor.execute('''
-            SELECT * FROM mailing_topics 
-            WHERE order_num > (SELECT order_num FROM mailing_topics WHERE id = ?)
-            AND is_active = 1
-            ORDER BY order_num ASC
-            LIMIT 1
-            ''', (last_topic['topic_id'],))
-        else:
-            # Первая рассылка - берем первую тему
-            cursor.execute('''
-            SELECT * FROM mailing_topics 
-            WHERE is_active = 1
-            ORDER BY order_num ASC
-            LIMIT 1
-            ''')
-        
-        topic = cursor.fetchone()
+        conn.commit()
         conn.close()
-        
-        return topic
     
-    def get_users_for_mailing(self, days_since_last: int = 3):
-        """Получение пользователей для рассылки"""
+    def get_users_by_filter(self, filter_type: str):
+        """Получение пользователей по фильтру"""
         conn = sqlite3.connect(self.db_name)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        cursor.execute('''
-        SELECT u.* 
-        FROM users u
-        WHERE u.is_active = 1
-        AND (
-            u.last_mailing_date IS NULL 
-            OR date(u.last_mailing_date, '+' || ? || ' days') <= date('now')
-        )
-        ORDER BY u.created_at DESC
-        ''', (days_since_last,))
+        if filter_type == "all":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company 
+            FROM users 
+            WHERE is_active = 1
+            ''')
+        elif filter_type == "with_questionnaire":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company 
+            FROM users 
+            WHERE is_active = 1 AND has_filled_questionnaire = 1
+            ''')
+        elif filter_type == "without_questionnaire":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company 
+            FROM users 
+            WHERE is_active = 1 AND has_filled_questionnaire = 0
+            ''')
+        elif filter_type == "recent_week":
+            cursor.execute('''
+            SELECT user_id, username, first_name, last_name, company 
+            FROM users 
+            WHERE is_active = 1 AND date(created_at) >= date('now', '-7 days')
+            ''')
+        else:
+            conn.close()
+            return []
         
         users = cursor.fetchall()
         conn.close()
         
         return users
-    
-    def update_last_mailing_date(self, user_id: int):
-        """Обновление даты последней рассылки"""
-        conn = sqlite3.connect(self.db_name)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        UPDATE users 
-        SET last_mailing_date = datetime('now')
-        WHERE user_id = ?
-        ''', (user_id,))
-        
-        conn.commit()
-        conn.close()
-    
-    def save_mailing_response(self, mailing_id: int, user_id: int, response_text: str):
-        """Сохранение ответа на рассылку"""
-        conn = sqlite3.connect(self.db_name)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        INSERT INTO mailing_responses (mailing_id, user_id, response_text)
-        VALUES (?, ?, ?)
-        ''', (mailing_id, user_id, response_text))
-        
-        cursor.execute('''
-        UPDATE mailings 
-        SET responded = 1, response_text = ?
-        WHERE id = ?
-        ''', (response_text, mailing_id))
-        
-        conn.commit()
-        conn.close()
     
     def get_statistics(self, days: int = 14):
         """Получение статистики за указанный период"""
@@ -503,33 +361,29 @@ class Database:
         ''', (start_date,))
         exports_completed = cursor.fetchone()['count']
         
-        # Отправленные рассылки
+        # Сообщения менеджеру
         cursor.execute('''
-        SELECT COUNT(*) as count FROM mailings 
-        WHERE date(sent_at) >= ?
+        SELECT COUNT(*) as count FROM manager_messages 
+        WHERE date(created_at) >= ?
         ''', (start_date,))
-        mailings_sent = cursor.fetchone()['count']
+        manager_messages = cursor.fetchone()['count']
         
-        # Реакции на рассылки
+        # Ручные рассылки
         cursor.execute('''
-        SELECT 
-            COUNT(DISTINCT user_id) as users_responded,
-            COUNT(*) as total_responses,
-            SUM(CASE WHEN clicked_link = 1 THEN 1 ELSE 0 END) as links_clicked
-        FROM mailings 
-        WHERE date(sent_at) >= ? AND responded = 1
+        SELECT COUNT(*) as count, SUM(sent_count) as total_sent 
+        FROM manual_mailings 
+        WHERE date(created_at) >= ?
         ''', (start_date,))
-        reactions = cursor.fetchone()
+        mailings = cursor.fetchone()
         
         conn.close()
         
         return {
             'new_users': new_users,
             'exports_completed': exports_completed,
-            'mailings_sent': mailings_sent,
-            'users_responded': reactions['users_responded'],
-            'total_responses': reactions['total_responses'],
-            'links_clicked': reactions['links_clicked']
+            'manager_messages': manager_messages,
+            'mailings_count': mailings['count'] if mailings['count'] else 0,
+            'mailings_sent': mailings['total_sent'] if mailings['total_sent'] else 0
         }
     
     def is_working_hours(self):
@@ -593,6 +447,7 @@ def get_main_keyboard():
         keyboard=[
             [KeyboardButton(text="📝 Заполнить анкету онлайн")],
             [KeyboardButton(text="📥 Скачать анкету в Word")],
+            [KeyboardButton(text="📤 Написать менеджеру")],
             [KeyboardButton(text="📊 Мои выгрузки")],
             [KeyboardButton(text="📞 Контакты"), KeyboardButton(text="ℹ️ Помощь")]
         ],
@@ -605,9 +460,9 @@ def get_admin_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📊 Новые анкеты"), KeyboardButton(text="✅ Отметить выгрузку")],
-            [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="📤 Запустить рассылку")],
-            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="⚙️ Настройки")],
-            [KeyboardButton(text="👤 Режим пользователя")]
+            [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="📨 Создать рассылку")],
+            [KeyboardButton(text="👥 Пользователи"), KeyboardButton(text="📩 Сообщения менеджеру")],
+            [KeyboardButton(text="⚙️ Настройки"), KeyboardButton(text="👤 Режим пользователя")]
         ],
         resize_keyboard=True
     )
@@ -630,7 +485,30 @@ def get_follow_up_keyboard():
         resize_keyboard=True
     )
 
-# =========== СОСТОЯНИЯ ДЛЯ АНКЕТЫ ===========
+def get_mailing_filters_keyboard():
+    """Клавиатура фильтров для рассылки"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="👥 Все пользователи")],
+            [KeyboardButton(text="📝 С анкетами")],
+            [KeyboardButton(text="📭 Без анкет")],
+            [KeyboardButton(text="🆕 За неделю")],
+            [KeyboardButton(text="❌ Отмена")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_manager_response_keyboard(message_id: int):
+    """Клавиатура для ответа менеджеру"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📞 Позвонить", callback_data=f"call_{message_id}")],
+            [InlineKeyboardButton(text="💬 Написать в Telegram", callback_data=f"write_{message_id}")],
+            [InlineKeyboardButton(text="✅ Обработано", callback_data=f"done_{message_id}")]
+        ]
+    )
+
+# =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
     waiting_for_name = State()
     waiting_for_company = State()
@@ -641,126 +519,69 @@ class Questionnaire(StatesGroup):
     waiting_for_budget = State()
     waiting_for_keywords = State()
 
-# =========== СИСТЕМА ЗАДАЧ ===========
-class TaskScheduler:
-    """Планировщик задач для follow-up и рассылок"""
-    
-    @staticmethod
-    async def check_follow_ups():
-        """Проверка запланированных follow-up сообщений"""
-        while True:
-            try:
-                pending = db.get_pending_follow_ups()
-                
-                for follow_up in pending:
-                    user_id = follow_up['user_id']
-                    
-                    keyboard = get_follow_up_keyboard()
-                    
-                    await bot.send_message(
-                        user_id,
-                        "📋 Подборка тендеров отправлена. Удалось ли найти что-то подходящее?",
-                        reply_markup=keyboard
-                    )
-                    
-                    # Отмечаем как отправленное
-                    conn = sqlite3.connect("tenders.db")
-                    cursor = conn.cursor()
-                    cursor.execute('''
-                    UPDATE tender_exports 
-                    SET follow_up_sent = 1
-                    WHERE id = ?
-                    ''', (follow_up['id'],))
-                    conn.commit()
-                    conn.close()
-                    
-                    logger.info(f"Отправлен follow-up пользователю {user_id}")
-                
-                await asyncio.sleep(60)  # Проверка каждую минуту
-                
-            except Exception as e:
-                logger.error(f"Ошибка в планировщике follow-up: {e}")
-                await asyncio.sleep(300)  # Пауза 5 минут при ошибке
-    
-    @staticmethod
-    async def send_mailings():
-        """Отправка запланированных рассылок"""
-        while True:
-            try:
-                # Получаем пользователей для рассылки (каждые 3 дня)
-                users = db.get_users_for_mailing(3)
-                
-                for user in users:
-                    user_id = user['user_id']
-                    
-                    # Получаем следующую тему
-                    topic = db.get_next_mailing_topic(user_id)
-                    
-                    if topic:
-                        # Формируем сообщение
-                        message = f"{topic['message_text']}\n\n"
-                        
-                        if topic['link']:
-                            message += f"Читайте в нашем материале: {topic['link']}\n\n"
-                        
-                        if topic['question']:
-                            message += f"{topic['question']}"
-                        
-                        try:
-                            await bot.send_message(user_id, message)
-                            
-                            # Сохраняем рассылку в БД
-                            mailing_id = db.create_mailing(user_id, topic['id'], message)
-                            db.update_last_mailing_date(user_id)
-                            
-                            logger.info(f"Отправлена рассылка {topic['title']} пользователю {user_id}")
-                            
-                        except Exception as e:
-                            logger.error(f"Не удалось отправить рассылку пользователю {user_id}: {e}")
-                
-                # Рассылки 2 раза в неделю (проверка каждые 3 дня)
-                await asyncio.sleep(259200)  # 3 дня в секундах
-                
-            except Exception as e:
-                logger.error(f"Ошибка в планировщике рассылок: {e}")
-                await asyncio.sleep(3600)  # Пауза 1 час при ошибке
-    
-    @staticmethod
-    async def generate_reports():
-        """Генерация отчетов раз в 2 недели"""
-        while True:
-            try:
-                # Формируем отчет за 14 дней
-                stats = db.get_statistics(14)
-                
-                report_text = f"""
-📊 ОТЧЕТ ЗА 2 НЕДЕЛИ
+class ManagerDialog(StatesGroup):
+    waiting_for_message = State()
 
-👥 Новые пользователи: {stats['new_users']}
-📋 Выполненные выгрузки: {stats['exports_completed']}
-📤 Отправленные рассылки: {stats['mailings_sent']}
-💬 Реакции на рассылки:
-   • Ответивших пользователей: {stats['users_responded']}
-   • Всего ответов: {stats['total_responses']}
-   • Переходов по ссылкам: {stats['links_clicked']}
+class ManualMailing(StatesGroup):
+    waiting_for_text = State()
+    waiting_for_filter = State()
+    waiting_for_confirmation = State()
 
-📅 Дата отчета: {datetime.now().strftime('%d.%m.%Y %H:%M')}
-                """
-                
-                # Отправляем отчет администратору
-                if ADMIN_ID:
-                    try:
-                        await bot.send_message(ADMIN_ID, report_text)
-                        logger.info("Отчет за 2 недели отправлен администратору")
-                    except Exception as e:
-                        logger.error(f"Не удалось отправить отчет администратору: {e}")
-                
-                # Ждем 14 дней до следующего отчета
-                await asyncio.sleep(1209600)  # 14 дней в секундах
-                
-            except Exception as e:
-                logger.error(f"Ошибка при генерации отчета: {e}")
-                await asyncio.sleep(86400)  # Пауза 1 день при ошибке
+# =========== ГЕНЕРАЦИЯ ДОКУМЕНТОВ ===========
+def generate_anketa_docx(user_data: dict = None):
+    """Генерация анкеты в формате DOCX (текстовый файл с расширением .docx)"""
+    from docx import Document
+    from docx.shared import Inches, Pt
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    
+    # Создаем документ
+    doc = Document()
+    
+    # Заголовок
+    title = doc.add_heading('АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ', 0)
+    title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    
+    # Информация о компании
+    doc.add_paragraph('Компания: Тритика (TenderGo)')
+    doc.add_paragraph('Дата: ' + datetime.now().strftime('%d.%m.%Y'))
+    doc.add_paragraph()
+    
+    # Если есть данные пользователя
+    if user_data:
+        doc.add_paragraph('Данные заполнены через бота:')
+        doc.add_paragraph(f'1. ФИО полностью: {user_data.get("full_name", "___________________")}')
+        doc.add_paragraph(f'2. Название компании: {user_data.get("company_name", "___________________")}')
+        doc.add_paragraph(f'3. Телефон для связи: {user_data.get("phone", "___________________")}')
+        doc.add_paragraph(f'4. Email для отправки тендеров: {user_data.get("email", "___________________")}')
+        doc.add_paragraph(f'5. Сфера деятельности компании: {user_data.get("activity", "___________________")}')
+        doc.add_paragraph(f'6. Ключевые слова для поиска: {user_data.get("keywords", "___________________")}')
+        doc.add_paragraph(f'7. Бюджет контрактов: {user_data.get("budget", "___________________")}')
+        doc.add_paragraph(f'8. Регионы работы: {user_data.get("region", "___________________")}')
+    else:
+        # Пустая анкета
+        doc.add_paragraph('1. ФИО полностью: ___________________')
+        doc.add_paragraph('2. Название компании: ___________________')
+        doc.add_paragraph('3. Телефон для связи: ___________________')
+        doc.add_paragraph('4. Email для отправки тендеров: ___________________')
+        doc.add_paragraph('5. Сфера деятельности компании: ___________________')
+        doc.add_paragraph('6. Ключевые слова для поиска: ___________________')
+        doc.add_paragraph('7. Бюджет контрактов: ___________________')
+        doc.add_paragraph('8. Регионы работы: ___________________')
+    
+    doc.add_paragraph()
+    doc.add_paragraph('Инструкция по заполнению:')
+    doc.add_paragraph('1. Заполните все поля анкеты')
+    doc.add_paragraph('2. Сохраните файл')
+    doc.add_paragraph('3. Отправьте заполненную анкету:')
+    doc.add_paragraph('   • На email: info@tritica.ru')
+    doc.add_paragraph('   • Или через бота (кнопка "Написать менеджеру")')
+    doc.add_paragraph('   • Или менеджеру в Telegram: @tritica_manager')
+    
+    # Сохраняем во временный файл
+    temp_file = tempfile.NamedTemporaryFile(suffix='.docx', delete=False)
+    doc.save(temp_file.name)
+    
+    return temp_file.name
 
 # =========== ОБРАБОТЧИКИ КОМАНД ===========
 @dp.message(Command("start"))
@@ -805,6 +626,7 @@ async def cmd_help(message: types.Message):
         "<b>Основные функции:</b>\n"
         "• Заполнить анкету онлайн\n"
         "• Скачать анкету в Word\n"
+        "• Написать менеджеру (отправить вопрос или заполненную анкету)\n"
         "• Получить бесплатную подборку тендеров\n"
         "• Консультация по участию в тендерах\n\n"
         "<b>Контакты поддержки:</b>\n"
@@ -884,9 +706,36 @@ async def start_online_questionnaire(message: types.Message, state: FSMContext):
     await state.set_state(Questionnaire.waiting_for_name)
 
 @dp.message(F.text == "📥 Скачать анкету в Word")
-async def download_questionnaire(message: types.Message):
+async def download_questionnaire(message: types.Message, state: FSMContext):
     """Скачать анкету в Word"""
-    questionnaire_text = """АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ
+    await state.clear()
+    
+    try:
+        # Генерируем анкету
+        anketa_path = generate_anketa_docx()
+        
+        # Отправляем файл
+        with open(anketa_path, 'rb') as anketa_file:
+            await message.answer_document(
+                anketa_file,
+                caption=(
+                    "📄 <b>Анкета для заполнения в Word</b>\n\n"
+                    "Заполните анкету и отправьте нам одним из способов:\n\n"
+                    "1. 📧 <b>Email:</b> info@tritica.ru\n"
+                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                    "3. 👨‍💼 <b>Менеджер в Telegram:</b> @tritica_manager\n\n"
+                    "<i>Или заполните анкету онлайн через бота (быстрее и удобнее)</i>"
+                )
+            )
+        
+        # Удаляем временный файл
+        os.unlink(anketa_path)
+        
+    except Exception as e:
+        logger.error(f"Ошибка генерации анкеты: {e}")
+        
+        # Отправляем текстовую версию
+        questionnaire_text = """АНКЕТА ДЛЯ ПОИСКА ТЕНДЕРОВ
 Компания: Тритика
 
 1. ФИО полностью: ___________________
@@ -898,18 +747,37 @@ async def download_questionnaire(message: types.Message):
 7. Бюджет контрактов: ___________________
 8. Регионы работы: ___________________
 
-Заполните и отправьте на: info@tritica.ru
-Или перешлите менеджеру в Telegram: @tritica_manager"""
-    
+Заполните и отправьте одним из способов:
+• На email: info@tritica.ru
+• Через бота (кнопка "Написать менеджеру")
+• Менеджеру в Telegram: @tritica_manager"""
+        
+        await message.answer(
+            "📄 <b>Анкета для заполнения</b>\n\n"
+            "Вы можете заполнить анкету и отправить нам.\n\n"
+            "<b>Способы отправки:</b>\n"
+            "📧 <b>Email:</b> info@tritica.ru\n"
+            "🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+            "👨‍💼 <b>Менеджер в Telegram:</b> @tritica_manager\n\n"
+            "<i>Или заполните анкету онлайн через бота (быстрее и удобнее)</i>"
+        )
+        
+        await message.answer(f"<pre>{questionnaire_text}</pre>")
+
+@dp.message(F.text == "📤 Написать менеджеру")
+async def start_manager_dialog(message: types.Message, state: FSMContext):
+    """Начало диалога с менеджером"""
+    await state.set_state(ManagerDialog.waiting_for_message)
     await message.answer(
-        "📄 <b>Скачайте анкету для заполнения</b>\n\n"
-        "Вы можете заполнить анкету в Word и отправить нам.\n\n"
-        "📧 <b>Email для отправки:</b> info@tritica.ru\n"
-        "👨‍💼 <b>Менджер в Telegram:</b> @tritica_manager\n\n"
-        "Или заполните анкету онлайн через бота (быстрее и удобнее)."
+        "💬 <b>Напишите ваше сообщение менеджеру</b>\n\n"
+        "Вы можете отправить:\n"
+        "• Текст с вопросом\n"
+        "• Заполненную анкету (файл Word)\n"
+        "• Документы\n"
+        "• Фотографии\n\n"
+        "<i>Мы получим ваше сообщение и ответим в ближайшее время.</i>",
+        reply_markup=get_cancel_keyboard()
     )
-    
-    await message.answer(f"<pre>{questionnaire_text}</pre>")
 
 @dp.message(F.text == "📊 Мои выгрузки")
 async def my_exports_button(message: types.Message):
@@ -942,17 +810,231 @@ async def show_help(message: types.Message):
 @dp.message(F.text == "❌ Отмена")
 async def cancel_action(message: types.Message, state: FSMContext):
     """Отмена действия"""
-    await state.clear()
+    current_state = await state.get_state()
     
-    is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
-    if is_admin:
-        await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard())
+    if current_state in [ManagerDialog.waiting_for_message, 
+                         ManualMailing.waiting_for_text,
+                         ManualMailing.waiting_for_filter,
+                         ManualMailing.waiting_for_confirmation]:
+        await state.clear()
+        is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
+        
+        if is_admin:
+            await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard())
+        else:
+            await message.answer(
+                "❌ Действие отменено.\n\n"
+                "Вы можете выбрать другое действие.",
+                reply_markup=get_main_keyboard()
+            )
     else:
-        await message.answer(
-            "❌ Заполнение анкеты отменено.\n\n"
-            "Вы можете начать заполнение заново в любое время.",
-            reply_markup=get_main_keyboard()
-        )
+        await state.clear()
+        is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
+        
+        if is_admin:
+            await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard())
+        else:
+            await message.answer(
+                "❌ Заполнение анкеты отменено.\n\n"
+                "Вы можете начать заполнение заново в любое время.",
+                reply_markup=get_main_keyboard()
+            )
+
+# =========== ДИАЛОГ С МЕНЕДЖЕРОМ ===========
+@dp.message(ManagerDialog.waiting_for_message)
+async def process_manager_message(message: types.Message, state: FSMContext):
+    """Обработка сообщения для менеджера"""
+    user = message.from_user
+    user_id = user.id
+    
+    # Определяем тип сообщения
+    message_type = "text"
+    file_id = None
+    file_name = None
+    
+    if message.document:
+        message_type = "document"
+        file_id = message.document.file_id
+        file_name = message.document.file_name
+        message_text = f"Документ: {message.document.file_name}"
+    elif message.photo:
+        message_type = "photo"
+        file_id = message.photo[-1].file_id
+        message_text = "Фотография"
+    elif message.text:
+        message_text = message.text
+    else:
+        await message.answer("❌ Извините, я могу принимать только текст, документы и фотографии.")
+        return
+    
+    # Сохраняем сообщение в БД
+    message_id = db.save_manager_message(user_id, message_type, message_text, file_id, file_name)
+    
+    # Отправляем уведомление администратору
+    if ADMIN_ID:
+        try:
+            # Формируем сообщение для админа
+            admin_message = f"📩 <b>НОВОЕ СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ</b>\n\n"
+            admin_message += f"👤 <b>Пользователь:</b> @{user.username or 'без username'}\n"
+            admin_message += f"🆔 <b>ID:</b> {user_id}\n"
+            admin_message += f"👤 <b>Имя:</b> {user.first_name} {user.last_name or ''}\n"
+            admin_message += f"📅 <b>Время:</b> {datetime.now().strftime('%H:%M %d.%m.%Y')}\n"
+            admin_message += f"📝 <b>Тип:</b> {message_type}\n\n"
+            
+            if message_type == "text":
+                admin_message += f"💬 <b>Сообщение:</b>\n{message_text[:500]}"
+                if len(message_text) > 500:
+                    admin_message += "..."
+            
+            elif message_type == "document":
+                admin_message += f"📎 <b>Документ:</b> {file_name}\n"
+                admin_message += f"💬 <b>Сообщение:</b>\n{message_text}"
+                
+            elif message_type == "photo":
+                admin_message += f"🖼 <b>Фотография</b>\n"
+                admin_message += f"💬 <b>Сообщение:</b>\n{message_text}"
+            
+            # Отправляем администратору
+            keyboard = get_manager_response_keyboard(message_id)
+            await bot.send_message(ADMIN_ID, admin_message, reply_markup=keyboard)
+            
+            # Если есть файл - пересылаем его
+            if file_id:
+                if message_type == "document":
+                    await bot.send_document(ADMIN_ID, file_id, caption=f"Документ от пользователя {user_id}")
+                elif message_type == "photo":
+                    await bot.send_photo(ADMIN_ID, file_id, caption=f"Фото от пользователя {user_id}")
+            
+        except Exception as e:
+            logger.error(f"Не удалось отправить уведомление админу: {e}")
+    
+    await message.answer(
+        "✅ <b>Ваше сообщение отправлено менеджеру!</b>\n\n"
+        "Мы получили ваше сообщение и свяжемся с вами в ближайшее время.\n\n"
+        "<i>Обычно мы отвечаем в течение 15 минут в рабочее время.</i>",
+        reply_markup=get_main_keyboard()
+    )
+    
+    await state.clear()
+
+# =========== CALLBACK ОБРАБОТЧИКИ ДЛЯ АДМИНА ===========
+@dp.callback_query(F.data.startswith("call_"))
+async def handle_call_callback(callback: types.CallbackQuery):
+    """Обработка кнопки "Позвонить" для сообщения менеджеру"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    message_id = int(callback.data.split("_")[1])
+    
+    # Получаем информацию о сообщении
+    conn = sqlite3.connect("tenders.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT mm.*, u.phone, u.first_name, u.last_name 
+    FROM manager_messages mm
+    JOIN users u ON mm.user_id = u.user_id
+    WHERE mm.id = ?
+    ''', (message_id,))
+    
+    message = cursor.fetchone()
+    conn.close()
+    
+    if not message:
+        await callback.answer("Сообщение не найдено", show_alert=True)
+        return
+    
+    phone = message['phone']
+    user_name = f"{message['first_name']} {message['last_name'] or ''}".strip()
+    
+    if phone:
+        response = f"📞 <b>Телефон пользователя:</b> {phone}\n"
+        response += f"👤 <b>Имя:</b> {user_name}\n"
+        response += f"🆔 <b>ID:</b> {message['user_id']}\n"
+        response += f"📅 <b>Время сообщения:</b> {message['created_at'][:19]}"
+    else:
+        response = "❌ У пользователя не указан телефон в анкете."
+    
+    await callback.message.answer(response)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("write_"))
+async def handle_write_callback(callback: types.CallbackQuery):
+    """Обработка кнопки "Написать в Telegram" для сообщения менеджеру"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    message_id = int(callback.data.split("_")[1])
+    
+    # Получаем информацию о сообщении
+    conn = sqlite3.connect("tenders.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT mm.*, u.username, u.first_name, u.last_name 
+    FROM manager_messages mm
+    JOIN users u ON mm.user_id = u.user_id
+    WHERE mm.id = ?
+    ''', (message_id,))
+    
+    message = cursor.fetchone()
+    conn.close()
+    
+    if not message:
+        await callback.answer("Сообщение не найдено", show_alert=True)
+        return
+    
+    username = message['username']
+    user_name = f"{message['first_name']} {message['last_name'] or ''}".strip()
+    
+    if username:
+        response = f"✏️ <b>Написать пользователю:</b>\n"
+        response += f"👤 <b>Username:</b> @{username}\n"
+        response += f"👤 <b>Имя:</b> {user_name}\n"
+        response += f"🆔 <b>ID:</b> {message['user_id']}\n"
+        response += f"🔗 <b>Ссылка:</b> https://t.me/{username}"
+    else:
+        response = f"✏️ <b>Написать пользователю:</b>\n"
+        response += f"👤 <b>Имя:</b> {user_name}\n"
+        response += f"🆔 <b>ID:</b> {message['user_id']}\n"
+        response += f"🔗 <b>Ссылка:</b> tg://user?id={message['user_id']}"
+    
+    await callback.message.answer(response)
+    await callback.answer()
+
+@dp.callback_query(F.data.startswith("done_"))
+async def handle_done_callback(callback: types.CallbackQuery):
+    """Обработка кнопки "Обработано" для сообщения менеджеру"""
+    if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
+        await callback.answer("⛔ Доступ запрещен", show_alert=True)
+        return
+    
+    message_id = int(callback.data.split("_")[1])
+    
+    # Отмечаем сообщение как обработанное
+    conn = sqlite3.connect("tenders.db")
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    UPDATE manager_messages 
+    SET processed = 1
+    WHERE id = ?
+    ''', (message_id,))
+    
+    conn.commit()
+    conn.close()
+    
+    # Обновляем сообщение
+    await callback.message.edit_text(
+        callback.message.text + "\n\n✅ <b>ОБРАБОТАНО</b>",
+        reply_markup=None
+    )
+    
+    await callback.answer("Сообщение отмечено как обработанное")
 
 # =========== АДМИН ПАНЕЛЬ ===========
 @dp.message(F.text == "📊 Новые анкеты")
@@ -1038,9 +1120,6 @@ async def process_export_id(message: types.Message):
     export_id = db.create_tender_export(questionnaire_id, questionnaire['user_id'])
     db.mark_export_completed(export_id, message.from_user.first_name)
     
-    # Планируем follow-up
-    db.schedule_follow_up(export_id)
-    
     # Отправляем пользователю уведомление
     time_info = ""
     if db.is_working_hours():
@@ -1062,8 +1141,7 @@ async def process_export_id(message: types.Message):
         f"✅ Выгрузка по анкете #{questionnaire_id} отмечена как выполненная\n\n"
         f"👤 Пользователь: {questionnaire['full_name']}\n"
         f"🏢 Компания: {questionnaire['company_name']}\n"
-        f"📧 Email: {questionnaire['email']}\n\n"
-        f"Follow-up запланирован через 1 час"
+        f"📧 Email: {questionnaire['email']}"
     )
 
 @dp.message(F.text == "📈 Статистика")
@@ -1084,11 +1162,12 @@ async def show_statistics(message: types.Message):
 📋 <b>Выгрузки:</b>
 • Выполненных выгрузок: {stats['exports_completed']}
 
-📤 <b>Рассылки:</b>
-• Отправлено рассылок: {stats['mailings_sent']}
-• Ответивших пользователей: {stats['users_responded']}
-• Всего ответов: {stats['total_responses']}
-• Переходов по ссылкам: {stats['links_clicked']}
+💬 <b>Сообщения менеджеру:</b>
+• Всего сообщений: {stats['manager_messages']}
+
+📨 <b>Ручные рассылки:</b>
+• Количество рассылок: {stats['mailings_count']}
+• Отправлено сообщений: {stats['mailings_sent']}
 
 📅 <b>Дата отчета:</b>
 {datetime.now().strftime('%d.%m.%Y %H:%M')}
@@ -1096,46 +1175,160 @@ async def show_statistics(message: types.Message):
     
     await message.answer(response)
 
-@dp.message(F.text == "📤 Запустить рассылку")
-async def trigger_mailing(message: types.Message):
-    """Запуск рассылки вручную"""
+@dp.message(F.text == "📨 Создать рассылку")
+async def start_create_mailing(message: types.Message, state: FSMContext):
+    """Начало создания ручной рассылки"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Доступ запрещен")
         return
     
-    # Запускаем рассылку в фоне
-    asyncio.create_task(send_mailings_now())
-    
-    await message.answer("🔄 Запущена рассылка пользователям...")
+    await state.set_state(ManualMailing.waiting_for_text)
+    await message.answer(
+        "📨 <b>Создание ручной рассылки</b>\n\n"
+        "Введите текст рассылки. Вы можете использовать HTML-разметку:\n"
+        "<b>жирный</b>, <i>курсив</i>, <code>код</code>\n\n"
+        "<i>Для отмены нажмите '❌ Отмена'</i>",
+        reply_markup=get_cancel_keyboard()
+    )
 
-async def send_mailings_now():
-    """Немедленная отправка рассылок"""
-    try:
-        users = db.get_users_for_mailing(0)  # Все пользователи
-        
-        for user in users:
-            user_id = user['user_id']
-            topic = db.get_next_mailing_topic(user_id)
-            
-            if topic:
-                message = f"{topic['message_text']}\n\n"
-                
-                if topic['link']:
-                    message += f"Читайте в нашем материале: {topic['link']}\n\n"
-                
-                if topic['question']:
-                    message += f"{topic['question']}"
-                
-                try:
-                    await bot.send_message(user_id, message)
-                    db.create_mailing(user_id, topic['id'], message)
-                    db.update_last_mailing_date(user_id)
-                    await asyncio.sleep(0.1)  # Небольшая пауза
-                except Exception as e:
-                    logger.error(f"Ошибка рассылки пользователю {user_id}: {e}")
+@dp.message(ManualMailing.waiting_for_text)
+async def process_mailing_text(message: types.Message, state: FSMContext):
+    """Обработка текста рассылки"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Создание рассылки отменено.", reply_markup=get_admin_keyboard())
+        return
     
-    except Exception as e:
-        logger.error(f"Ошибка массовой рассылки: {e}")
+    # Сохраняем текст рассылки
+    await state.update_data(mailing_text=message.text)
+    await state.set_state(ManualMailing.waiting_for_filter)
+    
+    await message.answer(
+        "✅ <b>Текст рассылки сохранен</b>\n\n"
+        "Теперь выберите категорию пользователей для рассылки:",
+        reply_markup=get_mailing_filters_keyboard()
+    )
+
+@dp.message(ManualMailing.waiting_for_filter)
+async def process_mailing_filter(message: types.Message, state: FSMContext):
+    """Обработка фильтра для рассылки"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer("❌ Создание рассылки отменено.", reply_markup=get_admin_keyboard())
+        return
+    
+    filter_map = {
+        "👥 Все пользователи": "all",
+        "📝 С анкетами": "with_questionnaire",
+        "📭 Без анкет": "without_questionnaire",
+        "🆕 За неделю": "recent_week"
+    }
+    
+    if message.text not in filter_map:
+        await message.answer("❌ Пожалуйста, выберите категорию из предложенных кнопок.")
+        return
+    
+    filter_type = filter_map[message.text]
+    
+    # Получаем пользователей по фильтру
+    users = db.get_users_by_filter(filter_type)
+    
+    if not users:
+        await message.answer(
+            f"❌ Нет пользователей по выбранному фильтру: {message.text}\n"
+            "Попробуйте выбрать другую категорию.",
+            reply_markup=get_mailing_filters_keyboard()
+        )
+        return
+    
+    await state.update_data(filter_type=filter_type, user_count=len(users))
+    await state.set_state(ManualMailing.waiting_for_confirmation)
+    
+    data = await state.get_data()
+    mailing_text = data['mailing_text'][:200] + "..." if len(data['mailing_text']) > 200 else data['mailing_text']
+    
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="✅ Да, отправить")],
+            [KeyboardButton(text="❌ Нет, отменить")]
+        ],
+        resize_keyboard=True
+    )
+    
+    await message.answer(
+        f"📨 <b>Подтверждение рассылки</b>\n\n"
+        f"<b>Текст:</b>\n{mailing_text}\n\n"
+        f"<b>Категория:</b> {message.text}\n"
+        f"<b>Количество пользователей:</b> {len(users)}\n\n"
+        f"<i>Отправить рассылку?</i>",
+        reply_markup=keyboard
+    )
+
+@dp.message(ManualMailing.waiting_for_confirmation)
+async def process_mailing_confirmation(message: types.Message, state: FSMContext):
+    """Подтверждение и отправка рассылки"""
+    if message.text == "❌ Нет, отменить":
+        await state.clear()
+        await message.answer("❌ Рассылка отменена.", reply_markup=get_admin_keyboard())
+        return
+    
+    if message.text != "✅ Да, отправить":
+        await message.answer("❌ Пожалуйста, используйте кнопки для подтверждения.")
+        return
+    
+    data = await state.get_data()
+    mailing_text = data['mailing_text']
+    filter_type = data['filter_type']
+    user_count = data['user_count']
+    
+    # Получаем пользователей
+    users = db.get_users_by_filter(filter_type)
+    
+    if not users:
+        await message.answer("❌ Ошибка: пользователи не найдены.", reply_markup=get_admin_keyboard())
+        await state.clear()
+        return
+    
+    # Создаем запись о рассылке
+    mailing_id = db.create_manual_mailing(
+        message.from_user.id,
+        mailing_text,
+        filter_type,
+        json.dumps({"user_count": user_count})
+    )
+    
+    # Отправляем рассылку
+    await message.answer(f"🔄 Начинаю отправку рассылки для {len(users)} пользователей...")
+    
+    success_count = 0
+    failed_count = 0
+    
+    for user in users:
+        try:
+            await bot.send_message(user['user_id'], mailing_text, parse_mode=ParseMode.HTML)
+            success_count += 1
+            
+            # Пауза, чтобы не превысить лимиты Telegram
+            await asyncio.sleep(0.05)
+            
+        except Exception as e:
+            logger.error(f"Не удалось отправить рассылку пользователю {user['user_id']}: {e}")
+            failed_count += 1
+    
+    # Обновляем статистику рассылки
+    db.update_mailing_stats(mailing_id, success_count, failed_count)
+    
+    await message.answer(
+        f"✅ <b>Рассылка завершена!</b>\n\n"
+        f"📨 <b>ID рассылки:</b> {mailing_id}\n"
+        f"👥 <b>Всего пользователей:</b> {len(users)}\n"
+        f"✅ <b>Успешно отправлено:</b> {success_count}\n"
+        f"❌ <b>Не удалось отправить:</b> {failed_count}\n\n"
+        f"<i>Рассылка сохранена в истории.</i>",
+        reply_markup=get_admin_keyboard()
+    )
+    
+    await state.clear()
 
 @dp.message(F.text == "👥 Пользователи")
 async def show_all_users(message: types.Message):
@@ -1152,11 +1345,11 @@ async def show_all_users(message: types.Message):
     SELECT u.*, 
            COUNT(DISTINCT q.id) as questionnaire_count,
            COUNT(DISTINCT te.id) as export_count,
-           COUNT(DISTINCT m.id) as mailing_count
+           COUNT(DISTINCT mm.id) as message_count
     FROM users u
     LEFT JOIN questionnaires q ON u.user_id = q.user_id
     LEFT JOIN tender_exports te ON q.id = te.questionnaire_id
-    LEFT JOIN mailings m ON u.user_id = m.user_id
+    LEFT JOIN manager_messages mm ON u.user_id = mm.user_id
     GROUP BY u.user_id
     ORDER BY u.created_at DESC
     LIMIT 20
@@ -1173,13 +1366,55 @@ async def show_all_users(message: types.Message):
     
     for i, user in enumerate(users, 1):
         date_str = user['created_at'][:10] if user['created_at'] else "??.??.????"
+        has_anketa = "✅" if user['has_filled_questionnaire'] else "❌"
+        
         response += f"{i}. <b>@{user['username'] or 'без username'}</b>\n"
         response += f"   🆔 ID: {user['user_id']}\n"
         response += f"   👤 {user['first_name']} {user['last_name'] or ''}\n"
-        response += f"   📋 Анкет: {user['questionnaire_count']}\n"
+        response += f"   📋 Анкета: {has_anketa}\n"
         response += f"   📤 Выгрузок: {user['export_count']}\n"
-        response += f"   📧 Рассылок: {user['mailing_count']}\n"
+        response += f"   💬 Сообщений: {user['message_count']}\n"
         response += f"   📅 Регистрация: {date_str}\n\n"
+    
+    await message.answer(response)
+
+@dp.message(F.text == "📩 Сообщения менеджеру")
+async def show_manager_messages(message: types.Message):
+    """Показать сообщения менеджеру"""
+    if not ADMIN_ID or message.from_user.id != ADMIN_ID:
+        await message.answer("⛔ Доступ запрещен")
+        return
+    
+    conn = sqlite3.connect("tenders.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    SELECT mm.*, u.username, u.first_name, u.last_name 
+    FROM manager_messages mm
+    JOIN users u ON mm.user_id = u.user_id
+    WHERE mm.processed = 0
+    ORDER BY mm.created_at DESC
+    LIMIT 10
+    ''')
+    
+    messages = cursor.fetchall()
+    conn.close()
+    
+    if not messages:
+        await message.answer("📭 Новых сообщений менеджеру нет")
+        return
+    
+    response = f"📩 <b>Новые сообщения менеджеру ({len(messages)}):</b>\n\n"
+    
+    for i, msg in enumerate(messages, 1):
+        date_str = msg['created_at'][:16] if msg['created_at'] else "??.?? ??:??"
+        type_icon = "💬" if msg['message_type'] == 'text' else "📎" if msg['message_type'] == 'document' else "🖼"
+        
+        response += f"{i}. <b>#{msg['id']}</b> {type_icon}\n"
+        response += f"   👤 @{msg['username'] or 'без username'}\n"
+        response += f"   📝 {msg['message_text'][:50]}...\n"
+        response += f"   ⏰ {date_str}\n\n"
     
     await message.answer(response)
 
@@ -1195,8 +1430,12 @@ async def show_settings(message: types.Message):
         "<b>Текущие параметры:</b>\n"
         f"• Время работы: {WORK_START_HOUR}:00-{WORK_END_HOUR}:00 Пн-Пт\n"
         f"• Follow-up через: 1 час\n"
-        f"• Рассылки каждые: 3 дня\n"
-        f"• Отчеты каждые: 14 дней\n\n"
+        f"• ID администратора: {ADMIN_ID}\n\n"
+        "<b>Функции:</b>\n"
+        "✅ Отправка анкет в Word\n"
+        "✅ Диалог с менеджером\n"
+        "✅ Ручные рассылки\n"
+        "✅ Автоматические отчеты\n\n"
         "<i>Для изменения настроек обратитесь к разработчику</i>"
     )
 
@@ -1348,181 +1587,6 @@ async def process_keywords(message: types.Message, state: FSMContext):
     
     await state.clear()
 
-# =========== ОБРАБОТКА FOLLOW-UP ОТВЕТОВ ===========
-@dp.message(F.text == "✅ Да, нашел подходящее")
-async def handle_positive_followup(message: types.Message):
-    """Обработка положительного ответа на follow-up"""
-    user_id = message.from_user.id
-    
-    # Ищем последнюю выгрузку пользователя
-    conn = sqlite3.connect("tenders.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT te.id 
-    FROM tender_exports te
-    JOIN questionnaires q ON te.questionnaire_id = q.id
-    WHERE q.user_id = ?
-    ORDER BY te.sent_at DESC
-    LIMIT 1
-    ''', (user_id,))
-    
-    export = cursor.fetchone()
-    conn.close()
-    
-    if export:
-        db.save_follow_up_response(export['id'], "Да, нашел подходящее")
-    
-    await message.answer(
-        "🎉 <b>Отлично!</b>\n\n"
-        "Рады, что нашли подходящие тендеры!\n\n"
-        "🤝 <b>Нужна помощь с подготовкой заявки?</b>\n"
-        "Мы можем проконсультировать по:\n"
-        "• Подготовке документов\n"
-        "• Требованиям организаторов\n"
-        "• Стратегии участия\n\n"
-        'Напишите "Консультация", и мы свяжемся с вами в течение 15 минут!',
-        reply_markup=get_main_keyboard()
-    )
-
-@dp.message(F.text == "❌ Нет, не нашел")
-async def handle_negative_followup(message: types.Message):
-    """Обработка отрицательного ответа на follow-up"""
-    user_id = message.from_user.id
-    
-    # Ищем последнюю выгрузку пользователя
-    conn = sqlite3.connect("tenders.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT te.id 
-    FROM tender_exports te
-    JOIN questionnaires q ON te.questionnaire_id = q.id
-    WHERE q.user_id = ?
-    ORDER BY te.sent_at DESC
-    LIMIT 1
-    ''', (user_id,))
-    
-    export = cursor.fetchone()
-    conn.close()
-    
-    if export:
-        db.save_follow_up_response(export['id'], "Нет, не нашел")
-    
-    await message.answer(
-        "😕 <b>Жаль, что не нашли подходящее.</b>\n\n"
-        "Мы учтем ваши пожелания и будем присылать новые тендеры по вашей сфере.\n\n"
-        "📧 <b>Вы также будете получать:</b>\n"
-        "• Полезные материалы по тендерам\n"
-        "• Новости госзакупок\n"
-        "• Советы по участию\n\n"
-        "<i>Следующая рассылка через несколько дней.</i>",
-        reply_markup=get_main_keyboard()
-    )
-
-@dp.message(F.text == "🤔 Нужна консультация")
-async def handle_consultation_request(message: types.Message):
-    """Обработка запроса на консультацию"""
-    user_id = message.from_user.id
-    
-    await message.answer(
-        "👨‍💼 <b>Запрос на консультацию принят!</b>\n\n"
-        "Наш менеджер свяжется с вами в течение 15 минут.\n\n"
-        "<b>Что обсудим:</b>\n"
-        "• Подготовку документов для участия\n"
-        "• Требования конкретных тендеров\n"
-        "• Стратегию подачи заявок\n"
-        "• Финансовое обеспечение\n\n"
-        "⏱️ <b>Ожидайте звонка или сообщения.</b>"
-    )
-    
-    # Уведомление администратору
-    if ADMIN_ID:
-        try:
-            await bot.send_message(
-                ADMIN_ID,
-                f"📞 <b>ЗАПРОС НА КОНСУЛЬТАЦИЮ</b>\n\n"
-                f"👤 Пользователь: @{message.from_user.username or 'без username'}\n"
-                f"🆔 ID: {user_id}\n"
-                f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
-            )
-        except Exception as e:
-            logger.error(f"Не удалось отправить уведомление о консультации: {e}")
-
-# =========== ОБРАБОТКА ОТВЕТОВ НА РАССЫЛКИ ===========
-@dp.message()
-async def handle_all_messages(message: types.Message):
-    """Обработчик всех сообщений (включая ответы на рассылки)"""
-    # Если это команда или кнопка меню - игнорируем
-    if message.text and (message.text.startswith('/') or message.text in [
-        "📝 Заполнить анкету онлайн", "📥 Скачать анкету в Word",
-        "📊 Мои выгрузки", "📞 Контакты", "ℹ️ Помощь",
-        "❌ Отмена", "✅ Да, нашел подходящее", "❌ Нет, не нашел",
-        "🤔 Нужна консультация"
-    ]):
-        return
-    
-    # Проверяем, есть ли активная рассылка для пользователя
-    conn = sqlite3.connect("tenders.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT m.id, m.topic_id, mt.question
-    FROM mailings m
-    JOIN mailing_topics mt ON m.topic_id = mt.id
-    WHERE m.user_id = ? 
-    AND m.responded = 0
-    AND date(m.sent_at) = date('now')
-    ORDER BY m.sent_at DESC
-    LIMIT 1
-    ''', (message.from_user.id,))
-    
-    mailing = cursor.fetchone()
-    conn.close()
-    
-    if mailing and message.text:
-        # Сохраняем ответ на рассылку
-        db.save_mailing_response(mailing['id'], message.from_user.id, message.text)
-        
-        # Благодарим за ответ
-        await message.answer(
-            "🙏 <b>Спасибо за ваш ответ!</b>\n\n"
-            "Ваше мнение очень важно для нас. "
-            "Мы учтем его в нашей дальнейшей работе."
-        )
-        
-        # Передаем ответ администратору
-        if ADMIN_ID:
-            try:
-                await bot.send_message(
-                    ADMIN_ID,
-                    f"💬 <b>ОТВЕТ НА РАССЫЛКУ</b>\n\n"
-                    f"👤 Пользователь: @{message.from_user.username or 'без username'}\n"
-                    f"🆔 ID: {message.from_user.id}\n"
-                    f"📝 Вопрос: {mailing['question']}\n"
-                    f"💭 Ответ: {message.text}\n"
-                    f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
-                )
-            except Exception as e:
-                logger.error(f"Не удалось отправить ответ на рассылку админу: {e}")
-        
-        return
-    
-    # Если это не ответ на рассылку и не команда
-    is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
-    await message.answer(
-        "🤖 <b>Я вас не понял</b>\n\n"
-        "Используйте кнопки меню или команды:\n"
-        "/start - Главное меню\n"
-        "/help - Помощь\n"
-        "/my_exports - Мои выгрузки\n\n"
-        "<i>Или выберите действие из меню:</i>",
-        reply_markup=get_main_keyboard() if not is_admin else get_admin_keyboard()
-    )
-
 # =========== ЗАПУСК БОТА И HTTP СЕРВЕРА ===========
 async def main():
     """Основная функция запуска"""
@@ -1559,13 +1623,6 @@ async def main():
     # Очищаем вебхуки
     await bot.delete_webhook(drop_pending_updates=True)
     print("✅ Вебхуки очищены")
-    
-    # Запускаем планировщики задач в фоне
-    print("🔄 Запуск планировщиков задач...")
-    asyncio.create_task(TaskScheduler.check_follow_ups())
-    asyncio.create_task(TaskScheduler.send_mailings())
-    asyncio.create_task(TaskScheduler.generate_reports())
-    print("✅ Планировщики задач запущены")
     
     print("\n" + "="*60)
     print("🤖 БОТ УСПЕШНО ЗАПУЩЕН!")
