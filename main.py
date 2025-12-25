@@ -579,7 +579,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -1082,13 +1082,22 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         
         # Отправляем администратору
         if anketa_path and os.path.exists(anketa_path):
-            # Отправляем с файлом
+            # Читаем файл как байты
             with open(anketa_path, 'rb') as f:
-                await bot.send_document(
-                    ADMIN_ID,
-                    types.BufferedInputFile(f.read(), filename=f"Анкета_{questionnaire_id}_{username}.docx"),
-                    caption=admin_message
-                )
+                file_bytes = f.read()
+            
+            # Создаем InputFile из байтов
+            input_file = types.BufferedInputFile(
+                file_bytes, 
+                filename=f"Анкета_{questionnaire_id}_{username}.docx"
+            )
+            
+            # Отправляем с файлом
+            await bot.send_document(
+                ADMIN_ID,
+                input_file,
+                caption=admin_message
+            )
             logger.info(f"Анкета #{questionnaire_id} с файлом отправлена администратору {ADMIN_ID}")
         else:
             # Отправляем только текст
@@ -1104,23 +1113,29 @@ async def send_anketa_file(user_id: int):
     try:
         # Проверяем, существует ли файл
         if os.path.exists(ANKETA_LOCAL_PATH):
-            with open(ANKETA_LOCAL_PATH, 'rb') as anketa_file:
-                await bot.send_document(
-                    user_id,
-                    types.BufferedInputFile(
-                        anketa_file.read(), 
-                        filename="Анкета_Тритика_шаблон.docx"
-                    ),
-                    caption=(
-                        "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                        "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                        "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                        "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                        "3. 👨‍💼 <b>Менеджеру в Telegram:</b> tritikaru\n\n"
-                        "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
-                    ),
-                    parse_mode=ParseMode.HTML
-                )
+            # Читаем файл как байты
+            with open(ANKETA_LOCAL_PATH, 'rb') as f:
+                file_bytes = f.read()
+            
+            # Создаем InputFile из байтов
+            input_file = types.BufferedInputFile(
+                file_bytes, 
+                filename="Анкета_Тритика_шаблон.docx"
+            )
+            
+            await bot.send_document(
+                user_id,
+                input_file,
+                caption=(
+                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> tritikaru\n\n"
+                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
             return True
         else:
             # Пытаемся скачать файл заново
@@ -1808,18 +1823,27 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
+            # Читаем файл как байты
             with open(file_path, 'rb') as f:
-                await bot.send_document(
-                    user_id,
-                    types.BufferedInputFile(f.read(), filename=file_name),
-                    caption=(
-                        f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                        f"🏢 <b>Компания:</b> {export['company_name']}\n"
-                        f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
-                        f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                        f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
-                    )
+                file_bytes = f.read()
+            
+            # Создаем InputFile из байтов
+            input_file = types.BufferedInputFile(
+                file_bytes, 
+                filename=file_name
+            )
+            
+            await bot.send_document(
+                user_id,
+                input_file,
+                caption=(
+                    f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
+                    f"🏢 <b>Компания:</b> {export['company_name']}\n"
+                    f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
+                    f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                    f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
                 )
+            )
             
             # Обновляем статус выгрузки
             db.mark_export_completed(export_id, callback.from_user.first_name)
@@ -3020,20 +3044,29 @@ async def process_keywords(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Отправляем заполненную анкету пользователю
+                # Читаем файл как байты
                 with open(anketa_path, 'rb') as f:
-                    await bot.send_document(
-                        user_id,
-                        types.BufferedInputFile(f.read(), filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"),
-                        caption=(
-                            "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
-                            "✅ <b>Вы можете:</b>\n"
-                            "1. Сохранить этот файл на компьютере\n"
-                            "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
-                            "3. Или мы обработаем ее автоматически\n\n"
-                            "<i>Анкета также отправлена менеджеру для обработки.</i>"
-                        )
+                    file_bytes = f.read()
+                
+                # Создаем InputFile из байтов
+                input_file = types.BufferedInputFile(
+                    file_bytes, 
+                    filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
+                )
+                
+                # Отправляем заполненную анкету пользователю
+                await bot.send_document(
+                    user_id,
+                    input_file,
+                    caption=(
+                        "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
+                        "✅ <b>Вы можете:</b>\n"
+                        "1. Сохранить этот файл на компьютере\n"
+                        "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
+                        "3. Или мы обработаем ее автоматически\n\n"
+                        "<i>Анкета также отправлена менеджеру для обработки.</i>"
                     )
+                )
                 
                 # Сохраняем анкету в БД с путем к файлу
                 questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
