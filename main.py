@@ -23,7 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove, FSInputFile
+    ReplyKeyboardRemove
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -1086,8 +1086,8 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
             with open(anketa_path, 'rb') as f:
                 file_bytes = f.read()
             
-            # Создаем InputFile из байтов
-            input_file = types.BufferedInputFile(
+            # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
+            input_file = types.BufferedInputFile.from_bytes(
                 file_bytes, 
                 filename=f"Анкета_{questionnaire_id}_{username}.docx"
             )
@@ -1117,8 +1117,8 @@ async def send_anketa_file(user_id: int):
             with open(ANKETA_LOCAL_PATH, 'rb') as f:
                 file_bytes = f.read()
             
-            # Создаем InputFile из байтов
-            input_file = types.BufferedInputFile(
+            # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
+            input_file = types.BufferedInputFile.from_bytes(
                 file_bytes, 
                 filename="Анкета_Тритика_шаблон.docx"
             )
@@ -1827,8 +1827,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             with open(file_path, 'rb') as f:
                 file_bytes = f.read()
             
-            # Создаем InputFile из байтов
-            input_file = types.BufferedInputFile(
+            # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
+            input_file = types.BufferedInputFile.from_bytes(
                 file_bytes, 
                 filename=file_name
             )
@@ -3048,8 +3048,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                 with open(anketa_path, 'rb') as f:
                     file_bytes = f.read()
                 
-                # Создаем InputFile из байтов
-                input_file = types.BufferedInputFile(
+                # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
+                input_file = types.BufferedInputFile.from_bytes(
                     file_bytes, 
                     filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
                 )
