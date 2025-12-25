@@ -136,9 +136,11 @@ async def download_anketa_file():
             async with session.get(ANKETA_GITHUB_URL, timeout=30) as response:
                 if response.status == 200:
                     content = await response.read()
+                    # Создаем папку, если её нет
+                    os.makedirs(os.path.dirname(ANKETA_LOCAL_PATH), exist_ok=True)
                     with open(ANKETA_LOCAL_PATH, 'wb') as f:
                         f.write(content)
-                    print(f"✅ Файл анкеты сохранен: {ANKETA_LOCAL_PATH}")
+                    print(f"✅ Файл анкеты сохранен: {ANKETA_LOCAL_PATH} ({len(content)} байт)")
                     return True
                 else:
                     print(f"❌ Ошибка скачивания файла: HTTP {response.status}")
@@ -579,7 +581,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -1082,8 +1084,14 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         
         # Отправляем администратору
         if anketa_path and os.path.exists(anketa_path):
-            # Используем FSInputFile для отправки файла
-            input_file = FSInputFile(anketa_path, filename=f"Анкета_{questionnaire_id}_{username}.docx")
+            # Используем BufferedInputFile для отправки файла
+            with open(anketa_path, 'rb') as f:
+                file_content = f.read()
+            
+            input_file = BufferedInputFile(
+                file_content, 
+                filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx"
+            )
             
             # Отправляем с файлом
             await bot.send_document(
@@ -1105,9 +1113,15 @@ async def send_anketa_file(user_id: int):
     """Отправка файла анкеты пользователю"""
     try:
         # Проверяем, существует ли файл
-        if os.path.exists(ANKETA_LOCAL_PATH):
-            # Используем FSInputFile для отправки файла
-            input_file = FSInputFile(ANKETA_LOCAL_PATH, filename="Анкета_Тритика_шаблон.docx")
+        if os.path.exists(ANKETA_LOCAL_PATH) and os.path.getsize(ANKETA_LOCAL_PATH) > 0:
+            # Используем BufferedInputFile для отправки файла
+            with open(ANKETA_LOCAL_PATH, 'rb') as f:
+                file_content = f.read()
+            
+            input_file = BufferedInputFile(
+                file_content, 
+                filename="Анкета_Тритика_шаблон.docx"
+            )
             
             await bot.send_document(
                 user_id,
@@ -1117,7 +1131,7 @@ async def send_anketa_file(user_id: int):
                     "Вы можете заполнить эту анкету и отправить нам:\n\n"
                     "1. 📧 <b>На email:</b> info@tritika.ru\n"
                     "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> tritikaru\n\n"
+                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
                     "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
                 ),
                 parse_mode=ParseMode.HTML
@@ -1125,7 +1139,7 @@ async def send_anketa_file(user_id: int):
             return True
         else:
             # Пытаемся скачать файл заново
-            print("Файл анкеты не найден, пытаюсь скачать...")
+            print("Файл анкеты не найден или пустой, пытаюсь скачать...")
             if await download_anketa_file():
                 return await send_anketa_file(user_id)
             else:
@@ -1320,7 +1334,7 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
     await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>")
     
     # Пытаемся скачать файл, если его нет
-    if not os.path.exists(ANKETA_LOCAL_PATH):
+    if not os.path.exists(ANKETA_LOCAL_PATH) or os.path.getsize(ANKETA_LOCAL_PATH) == 0:
         await message.answer("🔄 Файл анкеты не найден, скачиваю с GitHub...")
         success = await download_anketa_file()
         if not success:
@@ -1380,7 +1394,7 @@ async def show_contacts(message: types.Message):
         "• Email: info@tritika.ru\n"
         "• Telegram: @tritikaru\n\n"
         "<b>Техническая поддержка:</b>\n"
-        "• Email: info@tritika\n"
+        "• Email: info@tritika.ru\n"
         "• Telegram: @tritikaru\n\n"
         "<b>Время работы:</b>\n"
         "Пн-Чт: 8:30-17:30\n"
@@ -1558,7 +1572,7 @@ async def handle_write_callback(callback: types.CallbackQuery):
     
     message_id = int(callback.data.split("_")[1])
     
-    # Получаем информацию о сообщения
+    # Получаем информацию о сообщении
     conn = sqlite3.connect("tenders.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -1809,8 +1823,14 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
-            # Используем FSInputFile для отправки файла
-            input_file = FSInputFile(file_path, filename=file_name)
+            # Используем BufferedInputFile для отправки файла
+            with open(file_path, 'rb') as f:
+                file_content = f.read()
+            
+            input_file = BufferedInputFile(
+                file_content,
+                filename=file_name
+            )
             
             await bot.send_document(
                 user_id,
@@ -1827,7 +1847,11 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             # Обновляем статус выгрузки
             db.mark_export_completed(export_id, callback.from_user.first_name)
             
-            # Отмечаем, что follow-up запланирован (автоматически через 1 час)
+            # Удаляем временный файл
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.error(f"Не удалось удалить временный файл {file_path}: {e}")
             
             await callback.message.edit_text(
                 callback.message.text + "\n\n✅ <b>ВЫГРУЗКА ОТПРАВЛЕНА</b>",
@@ -1864,8 +1888,8 @@ async def handle_cancel_export(callback: types.CallbackQuery):
     if export and export['file_path'] and os.path.exists(export['file_path']):
         try:
             os.remove(export['file_path'])
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Не удалось удалить файл при отмене выгрузки: {e}")
     
     # Удаляем запись из БД
     conn = sqlite3.connect("tenders.db")
@@ -3023,8 +3047,14 @@ async def process_keywords(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Используем FSInputFile для отправки файла
-                input_file = FSInputFile(anketa_path, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
+                # Используем BufferedInputFile для отправки файла
+                with open(anketa_path, 'rb') as f:
+                    file_content = f.read()
+                
+                input_file = BufferedInputFile(
+                    file_content, 
+                    filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
+                )
                 
                 # Отправляем заполненную анкету пользователю
                 await bot.send_document(
@@ -3150,13 +3180,14 @@ async def main():
     
     # Скачиваем файл анкеты при запуске
     print("📥 Проверяю наличие файла анкеты...")
-    if not os.path.exists(ANKETA_LOCAL_PATH):
-        print("Файл анкеты не найден, скачиваю с GitHub...")
+    if not os.path.exists(ANKETA_LOCAL_PATH) or os.path.getsize(ANKETA_LOCAL_PATH) == 0:
+        print("Файл анкеты не найден или пустой, скачиваю с GitHub...")
         success = await download_anketa_file()
         if not success:
             print("⚠️ Внимание: Файл анкеты не скачан. Функция отправки анкет будет ограничена.")
     else:
-        print("✅ Файл анкеты уже существует")
+        file_size = os.path.getsize(ANKETA_LOCAL_PATH)
+        print(f"✅ Файл анкеты уже существует ({file_size} байт)")
     
     # Проверяем бота
     try:
