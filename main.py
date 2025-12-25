@@ -9,7 +9,6 @@ import asyncio
 import logging
 import sqlite3
 import tempfile
-import requests
 import json
 import io
 from datetime import datetime, timedelta
@@ -32,7 +31,7 @@ from docx import Document
 from docx.shared import Inches
 
 # Импорты для HTTP сервера Railway
-from aiohttp import web
+from aiohttp import web, ClientSession
 
 # =========== НАСТРОЙКИ ===========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8120629620:AAH2ZjoCPEoE39KRIrf8x9JYhOpScphnKgo")
@@ -133,22 +132,20 @@ async def download_anketa_file():
     """Скачивание файла анкеты с GitHub"""
     try:
         print("⬇️ Скачиваю файл анкеты с GitHub...")
-        response = requests.get(ANKETA_GITHUB_URL, timeout=30)
-        
-        if response.status_code == 200:
-            with open(ANKETA_LOCAL_PATH, 'wb') as f:
-                f.write(response.content)
-            print(f"✅ Файл анкеты сохранен: {ANKETA_LOCAL_PATH}")
-            return True
-        else:
-            print(f"❌ Ошибка скачивания файла: HTTP {response.status_code}")
-            return False
+        async with ClientSession() as session:
+            async with session.get(ANKETA_GITHUB_URL, timeout=30) as response:
+                if response.status == 200:
+                    content = await response.read()
+                    with open(ANKETA_LOCAL_PATH, 'wb') as f:
+                        f.write(content)
+                    print(f"✅ Файл анкеты сохранен: {ANKETA_LOCAL_PATH}")
+                    return True
+                else:
+                    print(f"❌ Ошибка скачивания файла: HTTP {response.status}")
+                    return False
     except Exception as e:
         print(f"❌ Ошибка скачивания анкеты: {e}")
         return False
-
-# Скачиваем файл при запуске
-asyncio.run(download_anketa_file())
 
 # =========== БАЗА ДАННЫХ ===========
 class Database:
@@ -582,7 +579,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?)
+        VALUES (?, ?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -1112,7 +1109,7 @@ async def send_anketa_file(user_id: int):
                     user_id,
                     types.BufferedInputFile(
                         anketa_file.read(), 
-                        filename=f"Анкета_Тритика_шаблон.docx"
+                        filename="Анкета_Тритика_шаблон.docx"
                     ),
                     caption=(
                         "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
@@ -1121,7 +1118,8 @@ async def send_anketa_file(user_id: int):
                         "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
                         "3. 👨‍💼 <b>Менеджеру в Telegram:</b> tritikaru\n\n"
                         "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
-                    )
+                    ),
+                    parse_mode=ParseMode.HTML
                 )
             return True
         else:
@@ -1134,11 +1132,17 @@ async def send_anketa_file(user_id: int):
                     user_id,
                     "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
                     "К сожалению, файл анкеты временно недоступен.\n\n"
-                    "Вы можете заполнить анкету онлайн или отправить запрос на email: info@tritika.ru"
+                    "Вы можете заполнить анкету онлайн или отправить запрос на email: info@tritika.ru",
+                    parse_mode=ParseMode.HTML
                 )
                 return False
     except Exception as e:
         logger.error(f"Ошибка при отправке файла анкеты: {e}")
+        await bot.send_message(
+            user_id,
+            "❌ Произошла ошибка при отправке файла. Попробуйте позже или свяжитесь с поддержкой.",
+            parse_mode=ParseMode.HTML
+        )
         return False
 
 # =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ FOLLOW-UP СООБЩЕНИЙ ===========
@@ -1347,7 +1351,7 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "📤 Написать менеджеру")
 async def start_manager_dialog(message: types.Message, state: FSMContext):
-    """Начало диалога с менеджером"""
+    """Начало диалога с менеджеру"""
     await state.set_state(ManagerDialog.waiting_for_message)
     await message.answer(
         "💬 <b>Напишите ваше сообщение менеджеру</b>\n\n"
@@ -1553,7 +1557,7 @@ async def handle_write_callback(callback: types.CallbackQuery):
     
     message_id = int(callback.data.split("_")[1])
     
-    # Получаем информацию о сообщении
+    # Получаем информацию о сообщения
     conn = sqlite3.connect("tenders.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
