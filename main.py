@@ -23,7 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove
+    ReplyKeyboardRemove, BufferedInputFile, FSInputFile
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -579,7 +579,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?)
+        VALUES (?, ?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -1082,15 +1082,8 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         
         # Отправляем администратору
         if anketa_path and os.path.exists(anketa_path):
-            # Читаем файл как байты
-            with open(anketa_path, 'rb') as f:
-                file_bytes = f.read()
-            
-            # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
-            input_file = types.BufferedInputFile.from_bytes(
-                file_bytes, 
-                filename=f"Анкета_{questionnaire_id}_{username}.docx"
-            )
+            # Используем FSInputFile для отправки файла
+            input_file = FSInputFile(anketa_path, filename=f"Анкета_{questionnaire_id}_{username}.docx")
             
             # Отправляем с файлом
             await bot.send_document(
@@ -1113,15 +1106,8 @@ async def send_anketa_file(user_id: int):
     try:
         # Проверяем, существует ли файл
         if os.path.exists(ANKETA_LOCAL_PATH):
-            # Читаем файл как байты
-            with open(ANKETA_LOCAL_PATH, 'rb') as f:
-                file_bytes = f.read()
-            
-            # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
-            input_file = types.BufferedInputFile.from_bytes(
-                file_bytes, 
-                filename="Анкета_Тритика_шаблон.docx"
-            )
+            # Используем FSInputFile для отправки файла
+            input_file = FSInputFile(ANKETA_LOCAL_PATH, filename="Анкета_Тритика_шаблон.docx")
             
             await bot.send_document(
                 user_id,
@@ -1823,15 +1809,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
-            # Читаем файл как байты
-            with open(file_path, 'rb') as f:
-                file_bytes = f.read()
-            
-            # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
-            input_file = types.BufferedInputFile.from_bytes(
-                file_bytes, 
-                filename=file_name
-            )
+            # Используем FSInputFile для отправки файла
+            input_file = FSInputFile(file_path, filename=file_name)
             
             await bot.send_document(
                 user_id,
@@ -3044,15 +3023,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Читаем файл как байты
-                with open(anketa_path, 'rb') as f:
-                    file_bytes = f.read()
-                
-                # Создаем InputFile из байтов - ИСПРАВЛЕННЫЙ КОД
-                input_file = types.BufferedInputFile.from_bytes(
-                    file_bytes, 
-                    filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
-                )
+                # Используем FSInputFile для отправки файла
+                input_file = FSInputFile(anketa_path, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
                 
                 # Отправляем заполненную анкету пользователю
                 await bot.send_document(
