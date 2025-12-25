@@ -1139,7 +1139,7 @@ async def send_anketa_file(user_id: int):
             )
             return False
         
-        # Используем FSInputFile для отправки файла
+        # Используем FSInputFile для отправки файла - ЭТО ПРАВИЛЬНЫЙ СПОСОБ
         document = FSInputFile(ANKETA_LOCAL_PATH, filename="Анкета_Тритика_шаблон.docx")
         
         await bot.send_document(
@@ -1155,16 +1155,45 @@ async def send_anketa_file(user_id: int):
             ),
             parse_mode=ParseMode.HTML
         )
+        logger.info(f"✅ Файл анкеты успешно отправлен пользователю {user_id}")
         return True
         
     except Exception as e:
         logger.error(f"Ошибка при отправке файла анкеты: {e}")
-        await bot.send_message(
-            user_id,
-            "❌ Произошла ошибка при отправке файла. Попробуйте позже или свяжитесь с поддержкой.",
-            parse_mode=ParseMode.HTML
-        )
-        return False
+        # Пробуем альтернативный способ с BufferedInputFile
+        try:
+            logger.info("Пробую отправить файл анкеты с помощью BufferedInputFile...")
+            with open(ANKETA_LOCAL_PATH, 'rb') as f:
+                file_content = f.read()
+            
+            input_file = BufferedInputFile(
+                file_content,
+                filename="Анкета_Тритика_шаблон.docx"
+            )
+            
+            await bot.send_document(
+                user_id,
+                input_file,
+                caption=(
+                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            logger.info(f"✅ Файл анкеты отправлен пользователю {user_id} через BufferedInputFile")
+            return True
+        except Exception as e2:
+            logger.error(f"Ошибка при отправке файла анкеты через BufferedInputFile: {e2}")
+            await bot.send_message(
+                user_id,
+                "❌ Произошла ошибка при отправке файла. Попробуйте позже или свяжитесь с поддержкой.",
+                parse_mode=ParseMode.HTML
+            )
+            return False
 
 # =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ FOLLOW-UP СООБЩЕНИЙ ===========
 async def send_follow_up_messages():
