@@ -1113,36 +1113,11 @@ async def send_anketa_file(user_id: int):
     """Отправка файла анкеты пользователю"""
     try:
         # Проверяем, существует ли файл
-        if os.path.exists(ANKETA_LOCAL_PATH) and os.path.getsize(ANKETA_LOCAL_PATH) > 0:
-            # Используем BufferedInputFile для отправки файла
-            with open(ANKETA_LOCAL_PATH, 'rb') as f:
-                file_content = f.read()
-            
-            input_file = BufferedInputFile(
-                file_content, 
-                filename="Анкета_Тритика_шаблон.docx"
-            )
-            
-            await bot.send_document(
-                user_id,
-                input_file,
-                caption=(
-                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
-                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
-                ),
-                parse_mode=ParseMode.HTML
-            )
-            return True
-        else:
+        if not os.path.exists(ANKETA_LOCAL_PATH):
+            logger.warning(f"Файл анкеты не найден: {ANKETA_LOCAL_PATH}")
             # Пытаемся скачать файл заново
-            print("Файл анкеты не найден или пустой, пытаюсь скачать...")
-            if await download_anketa_file():
-                return await send_anketa_file(user_id)
-            else:
+            success = await download_anketa_file()
+            if not success:
                 await bot.send_message(
                     user_id,
                     "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
@@ -1151,6 +1126,37 @@ async def send_anketa_file(user_id: int):
                     parse_mode=ParseMode.HTML
                 )
                 return False
+        
+        # Проверяем размер файла
+        file_size = os.path.getsize(ANKETA_LOCAL_PATH)
+        if file_size == 0:
+            logger.warning(f"Файл анкеты пустой: {ANKETA_LOCAL_PATH}")
+            await bot.send_message(
+                user_id,
+                "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                "Файл анкеты поврежден. Попробуйте позже или заполните анкету онлайн.",
+                parse_mode=ParseMode.HTML
+            )
+            return False
+        
+        # Используем FSInputFile для отправки файла
+        document = FSInputFile(ANKETA_LOCAL_PATH, filename="Анкета_Тритика_шаблон.docx")
+        
+        await bot.send_document(
+            user_id,
+            document,
+            caption=(
+                "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
+        return True
+        
     except Exception as e:
         logger.error(f"Ошибка при отправке файла анкеты: {e}")
         await bot.send_message(
@@ -2625,7 +2631,7 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
                     
                     await bot.send_message(
                         ADMIN_ID,
-                        f"{feedback_icon} <b>НОВЫЙ ОТЗЫВ НА РАССЫЛКУ</b>\n\n"
+                        f"{feedback_icon} <b>НОВЫЙ ОТЗЫВ НА РАССЫЛКИ</b>\n\n"
                         f"👤 Пользователь: @{username}\n"
                         f"🆔 ID: {user_id}\n"
                         f"📨 Рассылка ID: {mailing_id}\n"
@@ -2723,7 +2729,7 @@ async def show_feedback(message: types.Message):
         date_str = mailing['created_at'][:10] if mailing['created_at'] else "??.??.????"
         feedback_percent = (mailing['feedback_count'] / mailing['sent_count'] * 100) if mailing['sent_count'] > 0 else 0
         
-        button_text = f"📨 #{mailing['id']} ({date_str}) - {feedback_percent:.1f}% отзывов"
+        button_text = f"📨 #{mailing['id']} ({date_str}) - {feedback_percent}% отзывов"
         keyboard.inline_keyboard.append([
             InlineKeyboardButton(
                 text=button_text,
