@@ -23,7 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove, BufferedInputFile, InputFile
+    ReplyKeyboardRemove, BufferedInputFile, InputFile, FSInputFile
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -577,7 +577,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -807,7 +807,7 @@ class Database:
         
         cursor.execute('''
         SELECT COUNT(*) as count FROM questionnaires 
-        WHERE date(createdated_at) >= ?
+        WHERE date(created_at) >= ?
         ''', (start_date,))
         new_questionnaires = cursor.fetchone()['count']
         
@@ -1067,15 +1067,14 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         """
         
         if anketa_path and os.path.exists(anketa_path):
-            with open(anketa_path, 'rb') as f:
-                file = InputFile(f, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
-                
-                await bot.send_document(
-                    ADMIN_ID,
-                    document=file,
-                    caption=admin_message,
-                    parse_mode=ParseMode.HTML
-                )
+            file = FSInputFile(anketa_path, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
+            
+            await bot.send_document(
+                ADMIN_ID,
+                document=file,
+                caption=admin_message,
+                parse_mode=ParseMode.HTML
+            )
             
             logger.info(f"Анкета #{questionnaire_id} с файлом отправлена администратору {ADMIN_ID}")
         else:
@@ -1089,58 +1088,77 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
 async def send_anketa_file(user_id: int):
     """Отправка файла анкеты пользователю"""
     try:
+        # Проверяем наличие файла локально
         if not os.path.exists(ANKETA_LOCAL_PATH):
-            logger.warning(f"Файл анкеты не найден: {ANKETA_LOCAL_PATH}")
+            logger.warning(f"Файл анкеты не найден локально: {ANKETA_LOCAL_PATH}")
+            # Пробуем скачать с GitHub
+            success = await download_anketa_file()
+            if not success:
+                # Если не удалось скачать, отправляем ссылку на GitHub
+                await bot.send_message(
+                    user_id,
+                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                    f"Скачать анкету можно по ссылке:\n{ANKETA_GITHUB_URL}\n\n"
+                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>",
+                    parse_mode=ParseMode.HTML
+                )
+                return False
+        
+        # Проверяем размер файла
+        file_size = os.path.getsize(ANKETA_LOCAL_PATH)
+        if file_size == 0:
+            logger.warning(f"Файл анкеты пустой: {ANKETA_LOCAL_PATH}")
+            # Пробуем перескачать
             success = await download_anketa_file()
             if not success:
                 await bot.send_message(
                     user_id,
                     "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                    "К сожалению, файл анкеты временно недоступен.\n\n"
-                    "Вы можете заполнить анкету онлайн или отправить запрос на email: info@tritika.ru",
+                    "Файл анкеты поврежден. Попробуйте позже или заполните анкету онлайн.",
                     parse_mode=ParseMode.HTML
                 )
                 return False
         
-        file_size = os.path.getsize(ANKETA_LOCAL_PATH)
-        if file_size == 0:
-            logger.warning(f"Файл анкеты пустой: {ANKETA_LOCAL_PATH}")
-            await bot.send_message(
-                user_id,
-                "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                "Файл анкеты поврежден. Попробуйте позже или заполните анкету онлайн.",
-                parse_mode=ParseMode.HTML
-            )
-            return False
+        # Отправляем файл анкеты
+        file = FSInputFile(ANKETA_LOCAL_PATH, filename="Анкета_Тритика_шаблон.docx")
         
-        with open(ANKETA_LOCAL_PATH, 'rb') as f:
-            file = InputFile(f, filename="Анкета_Тритика_шаблон.docx")
-            
-            await bot.send_document(
-                user_id,
-                document=file,
-                caption=(
-                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
-                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
-                ),
-                parse_mode=ParseMode.HTML
-            )
+        await bot.send_document(
+            user_id,
+            document=file,
+            caption=(
+                "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
         
         logger.info(f"✅ Файл анкеты успешно отправлен пользователю {user_id}")
         return True
         
     except Exception as e:
         logger.error(f"Ошибка при отправке файла анкеты: {e}", exc_info=True)
+        
+        # Если не удалось отправить файл, отправляем ссылку
         await bot.send_message(
             user_id,
-            "❌ Произошла ошибка при отправке файла. Попробуйте позже или свяжитесь с поддержкой.",
+            f"📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+            f"Скачать анкету можно по ссылке:\n{ANKETA_GITHUB_URL}\n\n"
+            "Вы можете заполнить эту анкету и отправить нам:\n\n"
+            "1. 📧 <b>На email:</b> info@tritika.ru\n"
+            "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+            "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+            "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>",
             parse_mode=ParseMode.HTML
         )
-        return False
+        return True  # Возвращаем True, так как пользователь получил ссылку
 
 # =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ FOLLOW-UP СООБЩЕНИЙ ===========
 async def send_follow_up_messages():
@@ -1318,18 +1336,7 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
     
     await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>", parse_mode=ParseMode.HTML)
     
-    if not os.path.exists(ANKETA_LOCAL_PATH) or os.path.getsize(ANKETA_LOCAL_PATH) == 0:
-        await message.answer("🔄 Файл анкеты не найден, скачиваю с GitHub...", parse_mode=ParseMode.HTML)
-        success = await download_anketa_file()
-        if not success:
-            await message.answer(
-                "❌ Не удалось скачать файл анкеты. Пожалуйста, попробуйте позже.\n\n"
-                "Вы можете заполнить анкету онлайн через соответствующую кнопку.",
-                reply_markup=get_main_keyboard(),
-                parse_mode=ParseMode.HTML
-            )
-            return
-    
+    # Отправляем файл анкеты
     sent = await send_anketa_file(message.from_user.id)
     
     if sent:
@@ -1798,21 +1805,20 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
-            with open(file_path, 'rb') as f:
-                file = InputFile(f, filename=file_name)
-                
-                await bot.send_document(
-                    user_id,
-                    document=file,
-                    caption=(
-                        f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                        f"🏢 <b>Компания:</b> {export['company_name']}\n"
-                        f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
-                        f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                        f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
-                    ),
-                    parse_mode=ParseMode.HTML
-                )
+            file = FSInputFile(file_path, filename=file_name)
+            
+            await bot.send_document(
+                user_id,
+                document=file,
+                caption=(
+                    f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
+                    f"🏢 <b>Компания:</b> {export['company_name']}\n"
+                    f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
+                    f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                    f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
             
             db.mark_export_completed(export_id, callback.from_user.first_name)
             
@@ -2998,22 +3004,21 @@ async def process_keywords(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                with open(anketa_path, 'rb') as f:
-                    file = InputFile(f, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
-                    
-                    await bot.send_document(
-                        user_id,
-                        document=file,
-                        caption=(
-                            "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
-                            "✅ <b>Вы можете:</b>\n"
-                            "1. Сохранить этот файл на компьютере\n"
-                            "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
-                            "3. Или мы обработаем ее автоматически\n\n"
-                            "<i>Анкета также отправлена менеджеру для обработки.</i>"
-                        ),
-                        parse_mode=ParseMode.HTML
-                    )
+                file = FSInputFile(anketa_path, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
+                
+                await bot.send_document(
+                    user_id,
+                    document=file,
+                    caption=(
+                        "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
+                        "✅ <b>Вы можете:</b>\n"
+                        "1. Сохранить этот файл на компьютере\n"
+                        "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
+                        "3. Или мы обработаем ее автоматически\n\n"
+                        "<i>Анкета также отправлена менеджеру для обработки.</i>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
                 
                 questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
                 
@@ -3142,11 +3147,11 @@ async def main():
     
     # Скачиваем файл анкеты при запуске
     print("📥 Проверяю наличие файла анкеты...")
-    if not os.path.exists(ANKETA_LOCAL_PATH) or os.path.getsize(ANKETA_LOCAL_PATH) == 0:
-        print("Файл анкеты не найден или пустой, скачиваю с GitHub...")
+    if not os.path.exists(ANKETA_LOCAL_PATH):
+        print("Файл анкеты не найден локально, скачиваю с GitHub...")
         success = await download_anketa_file()
         if not success:
-            print("⚠️ Внимание: Файл анкеты не скачан. Функция отправки анкет будет ограничена.")
+            print("⚠️ Внимание: Файл анкеты не скачан. Будет использоваться ссылка на GitHub.")
     else:
         file_size = os.path.getsize(ANKETA_LOCAL_PATH)
         print(f"✅ Файл анкеты уже существует ({file_size} байт)")
@@ -3179,8 +3184,9 @@ async def main():
     asyncio.create_task(schedule_follow_ups())
     print("✅ Follow-up система запущена")
     
-    # Очищаем вебхуки
+    # Очищаем вебхуки и добавляем небольшую задержку
     await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(1)
     print("✅ Вебхуки очищены")
     
     print("\n" + "="*60)
