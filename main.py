@@ -23,7 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove, BufferedInputFile, InputFile, FSInputFile
+    ReplyKeyboardRemove, BufferedInputFile, InputFile
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -31,7 +31,8 @@ from docx import Document
 from docx.shared import Inches
 
 # Импорты для HTTP сервера Railway
-from aiohttp import web, ClientSession
+import aiohttp
+from aiohttp import web
 
 # =========== НАСТРОЙКИ ===========
 BOT_TOKEN = os.getenv("BOT_TOKEN", "8120629620:AAH2ZjoCPEoE39KRIrf8x9JYhOpScphnKgo")
@@ -63,7 +64,7 @@ print("="*60)
 try:
     bot = Bot(
         token=BOT_TOKEN,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML)  # Исправлено HTHTML на HTML
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML)
     )
     storage = MemoryStorage()
     dp = Dispatcher(storage=storage)
@@ -132,7 +133,7 @@ async def download_anketa_file():
     """Скачивание файла анкеты с GitHub"""
     try:
         print("⬇️ Скачиваю файл анкеты с GitHub...")
-        async with ClientSession() as session:
+        async with aiohttp.ClientSession() as session:
             async with session.get(ANKETA_GITHUB_URL, timeout=30) as response:
                 if response.status == 200:
                     content = await response.read()
@@ -175,7 +176,7 @@ class Database:
             region TEXT,
             is_active BOOLEAN DEFAULT 1,
             has_filled_questionnaire BOOLEAN DEFAULT 0,
-            mailing_subscribed BOOLEAN DEFAULT 1,  -- Новое: подписка на рассылку
+            mailing_subscribed BOOLEAN DEFAULT 1,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             last_mailing_date TIMESTAMP
         )
@@ -254,7 +255,7 @@ class Database:
             mailing_id INTEGER,
             user_id INTEGER,
             sent_message_id INTEGER,
-            feedback_type TEXT,  -- like, dislike, comment, unsubscribe
+            feedback_type TEXT,
             feedback_text TEXT,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -318,7 +319,6 @@ class Database:
         conn.commit()
         last_id = cursor.lastrowid
         
-        # Обновляем статус пользователя
         cursor.execute('''
         UPDATE users 
         SET phone = ?, email = ?, company = ?, activity = ?, region = ?, has_filled_questionnaire = 1
@@ -390,7 +390,6 @@ class Database:
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
-        # Выгрузки, отправленные более 1 часа назад, но follow-up еще не отправлен
         one_hour_ago = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
         
         cursor.execute('''
@@ -437,13 +436,11 @@ class Database:
         conn.commit()
         conn.close()
     
-    # =========== УПРАВЛЕНИЕ РАССЫЛКОЙ ===========
     def toggle_user_mailing_subscription(self, user_id: int):
         """Включение/выключение подписки на рассылку"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
-        # Получаем текущий статус
         cursor.execute('SELECT mailing_subscribed FROM users WHERE user_id = ?', (user_id,))
         current = cursor.fetchone()
         
@@ -557,7 +554,6 @@ class Database:
         
         return users
     
-    # =========== РАБОТА С РАССЫЛКАМИ ===========
     def create_manual_mailing(self, admin_id: int, mailing_text: str, mailing_type: str, filter_criteria: str):
         """Создание ручной рассылки"""
         conn = sqlite3.connect(self.db_name)
@@ -581,7 +577,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?)
+        VALUES (?, ?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -616,14 +612,12 @@ class Database:
         VALUES (?, ?, ?, ?, ?)
         ''', (mailing_id, user_id, sent_message_id, feedback_type, feedback_text))
         
-        # Обновляем статистику обратной связи в основной таблице
         cursor.execute('''
         UPDATE manual_mailings 
         SET feedback_count = feedback_count + 1
         WHERE id = ?
         ''', (mailing_id,))
         
-        # Отмечаем сообщение как получившее обратную связь
         cursor.execute('''
         UPDATE sent_messages 
         SET feedback_received = 1
@@ -693,7 +687,6 @@ class Database:
         
         return feedback
     
-    # =========== ОСТАЛЬНЫЕ МЕТОДЫ ===========
     def save_manager_message(self, user_id: int, message_type: str, message_text: str, file_id: str = None, file_name: str = None):
         """Сохранение сообщения менеджеру"""
         conn = sqlite3.connect(self.db_name)
@@ -775,28 +768,24 @@ class Database:
         
         start_date = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
         
-        # Новые пользователи
         cursor.execute('''
         SELECT COUNT(*) as count FROM users 
         WHERE date(created_at) >= ?
         ''', (start_date,))
         new_users = cursor.fetchone()['count']
         
-        # Выполненные выгрузки
         cursor.execute('''
         SELECT COUNT(*) as count FROM tender_exports 
         WHERE date(sent_at) >= ? AND status = 'completed'
         ''', (start_date,))
         exports_completed = cursor.fetchone()['count']
         
-        # Сообщения менеджеру
         cursor.execute('''
         SELECT COUNT(*) as count FROM manager_messages 
         WHERE date(created_at) >= ?
         ''', (start_date,))
         manager_messages = cursor.fetchone()['count']
         
-        # Ручные рассылки
         cursor.execute('''
         SELECT 
             COUNT(*) as count, 
@@ -807,7 +796,6 @@ class Database:
         ''', (start_date,))
         mailings = cursor.fetchone()
         
-        # Пользователи с подпиской
         cursor.execute('''
         SELECT 
             SUM(CASE WHEN mailing_subscribed = 1 THEN 1 ELSE 0 END) as subscribed,
@@ -817,10 +805,9 @@ class Database:
         ''')
         subscriptions = cursor.fetchone()
         
-        # Анкеты
         cursor.execute('''
         SELECT COUNT(*) as count FROM questionnaires 
-        WHERE date(created_at) >= ?
+        WHERE date(createdated_at) >= ?
         ''', (start_date,))
         new_questionnaires = cursor.fetchone()['count']
         
@@ -830,11 +817,11 @@ class Database:
             'new_users': new_users,
             'exports_completed': exports_completed,
             'manager_messages': manager_messages,
-            'mailings_count': mailings['count'] if mailings['count'] else 0,
-            'mailings_sent': mailings['total_sent'] if mailings['total_sent'] else 0,
-            'mailings_feedback': mailings['total_feedback'] if mailings['total_feedback'] else 0,
-            'subscribed_users': subscriptions['subscribed'] if subscriptions['subscribed'] else 0,
-            'unsubscribed_users': subscriptions['unsubscribed'] if subscriptions['unsubscribed'] else 0,
+            'mailings_count': mailings['count'] if mailings and mailings['count'] else 0,
+            'mailings_sent': mailings['total_sent'] if mailings and mailings['total_sent'] else 0,
+            'mailings_feedback': mailings['total_feedback'] if mailings and mailings['total_feedback'] else 0,
+            'subscribed_users': subscriptions['subscribed'] if subscriptions and subscriptions['subscribed'] else 0,
+            'unsubscribed_users': subscriptions['unsubscribed'] if subscriptions and subscriptions['unsubscribed'] else 0,
             'new_questionnaires': new_questionnaires
         }
     
@@ -854,11 +841,9 @@ class Database:
         """Получение следующего рабочего времени"""
         now = datetime.now()
         
-        # Если сейчас рабочее время
         if self.is_working_hours():
             return now
         
-        # Вычисляем следующий рабочий день
         days_to_add = 1
         while (now.weekday() + days_to_add) % 7 not in WORK_DAYS:
             days_to_add += 1
@@ -1045,7 +1030,6 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         return
     
     try:
-        # Формируем красивое сообщение с анкетой
         admin_message = f"""
 📋 <b>НОВАЯ АНКЕТА #{questionnaire_id}</b>
 
@@ -1082,13 +1066,10 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
 {'✅ <b>Заполнено в рабочее время</b>' if db.is_working_hours() else '⏰ <b>Заполнено в нерабочее время</b>'}
         """
         
-        # Отправляем администратору
         if anketa_path and os.path.exists(anketa_path):
-            # Используем InputFile для отправки файла
             with open(anketa_path, 'rb') as f:
                 file = InputFile(f, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
                 
-                # Отправляем с файлом
                 await bot.send_document(
                     ADMIN_ID,
                     document=file,
@@ -1098,7 +1079,6 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
             
             logger.info(f"Анкета #{questionnaire_id} с файлом отправлена администратору {ADMIN_ID}")
         else:
-            # Отправляем только текст
             await bot.send_message(ADMIN_ID, admin_message, parse_mode=ParseMode.HTML)
             logger.info(f"Анкета #{questionnaire_id} отправлена администратору {ADMIN_ID}")
         
@@ -1109,10 +1089,8 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
 async def send_anketa_file(user_id: int):
     """Отправка файла анкеты пользователю"""
     try:
-        # Проверяем, существует ли файл
         if not os.path.exists(ANKETA_LOCAL_PATH):
             logger.warning(f"Файл анкеты не найден: {ANKETA_LOCAL_PATH}")
-            # Пытаемся скачать файл заново
             success = await download_anketa_file()
             if not success:
                 await bot.send_message(
@@ -1124,7 +1102,6 @@ async def send_anketa_file(user_id: int):
                 )
                 return False
         
-        # Проверяем размер файла
         file_size = os.path.getsize(ANKETA_LOCAL_PATH)
         if file_size == 0:
             logger.warning(f"Файл анкеты пустой: {ANKETA_LOCAL_PATH}")
@@ -1136,7 +1113,6 @@ async def send_anketa_file(user_id: int):
             )
             return False
         
-        # Используем InputFile для отправки файла
         with open(ANKETA_LOCAL_PATH, 'rb') as f:
             file = InputFile(f, filename="Анкета_Тритика_шаблон.docx")
             
@@ -1178,7 +1154,6 @@ async def send_follow_up_messages():
             username = export['username'] or "Пользователь"
             
             try:
-                # Отправляем follow-up сообщение
                 await bot.send_message(
                     user_id,
                     f"📨 <b>Подборка тендеров отправлена!</b>\n\n"
@@ -1187,7 +1162,6 @@ async def send_follow_up_messages():
                     parse_mode=ParseMode.HTML
                 )
                 
-                # Отмечаем, что follow-up отправлен
                 db.mark_followup_sent(export_id)
                 
                 logger.info(f"Follow-up отправлен пользователю {user_id} для выгрузки #{export_id}")
@@ -1207,7 +1181,6 @@ async def schedule_follow_ups():
         except Exception as e:
             logger.error(f"Ошибка в schedule_follow_ups: {e}")
         
-        # Проверяем каждые 5 минут
         await asyncio.sleep(300)
 
 # =========== ОБРАБОТЧИКИ КОМАНД ===========
@@ -1330,7 +1303,6 @@ async def start_online_questionnaire(message: types.Message, state: FSMContext):
     """Начало заполнения анкеты онлайн"""
     await state.clear()
     
-    # Начинаем заполнение анкеты онлайн
     await message.answer(
         "📝 <b>Заполнение анкеты онлайн</b>\n\n"
         "Заполнение займет 3-5 минут. Введите ваше <b>ФИО полностью</b>:",
@@ -1346,7 +1318,6 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
     
     await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>", parse_mode=ParseMode.HTML)
     
-    # Пытаемся скачать файл, если его нет
     if not os.path.exists(ANKETA_LOCAL_PATH) or os.path.getsize(ANKETA_LOCAL_PATH) == 0:
         await message.answer("🔄 Файл анкеты не найден, скачиваю с GitHub...", parse_mode=ParseMode.HTML)
         success = await download_anketa_file()
@@ -1359,11 +1330,9 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
             )
             return
     
-    # Отправляем файл
     sent = await send_anketa_file(message.from_user.id)
     
     if sent:
-        # После отправки шаблона, предлагаем заполнить онлайн или отправить менеджеру
         await message.answer(
             "📝 <b>Что дальше?</b>\n\n"
             "1. Заполните анкету на компьютере\n"
@@ -1470,7 +1439,6 @@ async def process_manager_message(message: types.Message, state: FSMContext):
     user = message.from_user
     user_id = user.id
     
-    # Определяем тип сообщения
     message_type = "text"
     file_id = None
     file_name = None
@@ -1490,13 +1458,10 @@ async def process_manager_message(message: types.Message, state: FSMContext):
         await message.answer("❌ Извините, я могу принимать только текст, документы и фотографии.", parse_mode=ParseMode.HTML)
         return
     
-    # Сохраняем сообщение в БД
     message_id = db.save_manager_message(user_id, message_type, message_text, file_id, file_name)
     
-    # Отправляем уведомление администратору
     if ADMIN_ID:
         try:
-            # Формируем сообщение для админа
             admin_message = f"📩 <b>НОВОЕ СООБЩЕНИЕ ОТ ПОЛЬЗОВАТЕЛЯ</b>\n\n"
             admin_message += f"👤 <b>Пользователь:</b> @{user.username or 'без username'}\n"
             admin_message += f"🆔 <b>ID:</b> {user_id}\n"
@@ -1517,11 +1482,9 @@ async def process_manager_message(message: types.Message, state: FSMContext):
                 admin_message += f"🖼 <b>Фотография</b>\n"
                 admin_message += f"💬 <b>Сообщение:</b>\n{message_text}"
             
-            # Отправляем администратору
             keyboard = get_manager_response_keyboard(message_id)
             await bot.send_message(ADMIN_ID, admin_message, reply_markup=keyboard, parse_mode=ParseMode.HTML)
             
-            # Если есть файл - пересылаем его
             if file_id:
                 if message_type == "document":
                     await bot.send_document(ADMIN_ID, file_id, caption=f"Документ от пользователя {user_id}", parse_mode=ParseMode.HTML)
@@ -1551,7 +1514,6 @@ async def handle_call_callback(callback: types.CallbackQuery):
     
     message_id = int(callback.data.split("_")[1])
     
-    # Получаем информацию о сообщении
     conn = sqlite3.connect("tenders.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -1593,7 +1555,6 @@ async def handle_write_callback(callback: types.CallbackQuery):
     
     message_id = int(callback.data.split("_")[1])
     
-    # Получаем информацию о сообщения
     conn = sqlite3.connect("tenders.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -1639,7 +1600,6 @@ async def handle_done_callback(callback: types.CallbackQuery):
     
     message_id = int(callback.data.split("_")[1])
     
-    # Отмечаем сообщение как обработанное
     conn = sqlite3.connect("tenders.db")
     cursor = conn.cursor()
     
@@ -1652,7 +1612,6 @@ async def handle_done_callback(callback: types.CallbackQuery):
     conn.commit()
     conn.close()
     
-    # Обновляем сообщение
     await callback.message.edit_text(
         callback.message.text + "\n\n✅ <b>ОБРАБОТАНО</b>",
         reply_markup=None,
@@ -1732,7 +1691,6 @@ async def process_export_questionnaire_id(message: types.Message, state: FSMCont
     
     questionnaire_id = int(message.text)
     
-    # Проверяем существование анкеты
     questionnaire = db.get_questionnaire_by_id(questionnaire_id)
     
     if not questionnaire:
@@ -1779,24 +1737,19 @@ async def process_export_file(message: types.Message, state: FSMContext):
         await state.clear()
         return
     
-    # Сохраняем файл во временное хранилище
     file_id = message.document.file_id
     file_name = message.document.file_name
     
     try:
-        # Скачиваем файл
         file = await bot.get_file(file_id)
         file_path = file.file_path
         
-        # Создаем временный файл
         temp_file = tempfile.NamedTemporaryFile(delete=False, suffix=f"_{file_name}")
         temp_path = temp_file.name
         temp_file.close()
         
-        # Скачиваем файл
         await bot.download_file(file_path, temp_path)
         
-        # Создаем запись о выгрузке
         export_id = db.create_tender_export(
             questionnaire_id, 
             questionnaire['user_id'],
@@ -1804,7 +1757,6 @@ async def process_export_file(message: types.Message, state: FSMContext):
             file_name
         )
         
-        # Показываем подтверждение
         keyboard = get_export_confirmation_keyboard(export_id)
         
         await message.answer(
@@ -1834,7 +1786,6 @@ async def handle_confirm_export(callback: types.CallbackQuery):
     
     export_id = int(callback.data.split("_")[2])
     
-    # Получаем информацию о выгрузке
     export = db.get_export_by_id(export_id)
     
     if not export:
@@ -1842,13 +1793,11 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         return
     
     try:
-        # Отправляем файл пользователю
         user_id = export['user_id']
         file_path = export['file_path']
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
-            # Используем InputFile для отправки файла
             with open(file_path, 'rb') as f:
                 file = InputFile(f, filename=file_name)
                 
@@ -1865,10 +1814,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                     parse_mode=ParseMode.HTML
                 )
             
-            # Обновляем статус выгрузки
             db.mark_export_completed(export_id, callback.from_user.first_name)
             
-            # Удаляем временный файл
             try:
                 os.remove(file_path)
             except Exception as e:
@@ -1880,7 +1827,6 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 parse_mode=ParseMode.HTML
             )
             
-            # Отправляем подтверждение админу
             await callback.message.answer(
                 f"✅ <b>Выгрузка #{export_id} отправлена пользователю</b>\n\n"
                 f"👤 Пользователь: {export['full_name']}\n"
@@ -1906,7 +1852,6 @@ async def handle_cancel_export(callback: types.CallbackQuery):
     
     export_id = int(callback.data.split("_")[2])
     
-    # Удаляем временный файл если есть
     export = db.get_export_by_id(export_id)
     if export and export['file_path'] and os.path.exists(export['file_path']):
         try:
@@ -1914,7 +1859,6 @@ async def handle_cancel_export(callback: types.CallbackQuery):
         except Exception as e:
             logger.error(f"Не удалось удалить файл при отмене выгрузки: {e}")
     
-    # Удаляем запись из БД
     conn = sqlite3.connect("tenders.db")
     cursor = conn.cursor()
     cursor.execute('DELETE FROM tender_exports WHERE id = ?', (export_id,))
@@ -1970,13 +1914,12 @@ async def handle_follow_up_response(callback: types.CallbackQuery):
     """Обработка ответа на follow-up сообщение"""
     try:
         parts = callback.data.split("_")
-        response_type = parts[1]  # yes, no, consult
+        response_type = parts[1]
         export_id = int(parts[2])
         
         user_id = callback.from_user.id
         username = callback.from_user.username or "без username"
         
-        # Сохраняем ответ
         response_map = {
             "yes": "Да, нашел подходящее",
             "no": "Нет, не нашел",
@@ -1986,7 +1929,6 @@ async def handle_follow_up_response(callback: types.CallbackQuery):
         response_text = response_map.get(response_type, "Неизвестно")
         db.save_followup_response(export_id, response_text)
         
-        # Отправляем благодарность
         thank_you_text = {
             "yes": "Отлично! Мы рады, что вы нашли подходящие тендеры. 🎉",
             "no": "Жаль, что не нашли подходящее. Мы можем сделать более точную подборку. 📊",
@@ -1999,7 +1941,6 @@ async def handle_follow_up_response(callback: types.CallbackQuery):
             parse_mode=ParseMode.HTML
         )
         
-        # Уведомляем администратора
         if ADMIN_ID:
             try:
                 export = db.get_export_by_id(export_id)
@@ -2031,14 +1972,12 @@ async def manage_subscriptions(message: types.Message):
         await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
-    # Получаем пользователей
     users = db.get_all_users_with_subscription(30)
     
     if not users:
         await message.answer("👥 Пользователей нет", parse_mode=ParseMode.HTML)
         return
     
-    # Создаем инлайн-клавиатуру для управления
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     
     for user in users:
@@ -2054,12 +1993,11 @@ async def manage_subscriptions(message: types.Message):
         
         keyboard.inline_keyboard.append([
             InlineKeyboardButton(
-                text=button_text[:50],  # Ограничиваем длину
+                text=button_text[:50],
                 callback_data=f"manage_user_{user['user_id']}"
             )
         ])
     
-    # Добавляем кнопки фильтров
     keyboard.inline_keyboard.append([
         InlineKeyboardButton(text="✅ Только подписанные", callback_data="filter_subscribed"),
         InlineKeyboardButton(text="❌ Только отписанные", callback_data="filter_unsubscribed")
@@ -2091,7 +2029,6 @@ async def handle_manage_user(callback: types.CallbackQuery):
     
     user_id = int(callback.data.split("_")[2])
     
-    # Получаем информацию о пользователе
     user_info = db.get_user_mailing_status(user_id)
     
     if not user_info:
@@ -2125,14 +2062,12 @@ async def handle_toggle_subscription(callback: types.CallbackQuery):
     
     user_id = int(callback.data.split("_")[2])
     
-    # Переключаем подписку
     new_status = db.toggle_user_mailing_subscription(user_id)
     
     if new_status is None:
         await callback.answer("Ошибка при изменении подписки", show_alert=True)
         return
     
-    # Получаем обновленную информацию
     user_info = db.get_user_mailing_status(user_id)
     
     if not user_info:
@@ -2143,7 +2078,6 @@ async def handle_toggle_subscription(callback: types.CallbackQuery):
     
     user_name = f"{user_info['first_name']} {user_info['last_name'] or ''}".strip()
     
-    # Обновляем сообщение
     await callback.message.edit_text(
         f"👤 <b>Управление подпиской пользователя</b>\n\n"
         f"<b>Пользователь:</b> {user_name}\n"
@@ -2165,12 +2099,10 @@ async def handle_user_stats(callback: types.CallbackQuery):
     
     user_id = int(callback.data.split("_")[2])
     
-    # Получаем статистику пользователя
     conn = sqlite3.connect("tenders.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Информация о пользователе
     cursor.execute('''
     SELECT u.*, 
            COUNT(DISTINCT q.id) as questionnaire_count,
@@ -2196,7 +2128,6 @@ async def handle_user_stats(callback: types.CallbackQuery):
     user_name = f"{user['first_name']} {user['last_name'] or ''}".strip()
     username = f"@{user['username']}" if user['username'] else "без username"
     
-    # Получаем последние отзывы
     feedback = db.get_mailing_feedback_for_user(user_id)
     
     response = f"""
@@ -2246,7 +2177,6 @@ async def handle_subscription_stats(callback: types.CallbackQuery):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Общая статистика
     cursor.execute('''
     SELECT 
         COUNT(*) as total_users,
@@ -2260,7 +2190,6 @@ async def handle_subscription_stats(callback: types.CallbackQuery):
     
     stats = cursor.fetchone()
     
-    # Статистика по отпискам за последний месяц
     cursor.execute('''
     SELECT COUNT(*) as recent_unsubscribes
     FROM mailing_feedback 
@@ -2309,7 +2238,6 @@ async def handle_filter_subs(callback: types.CallbackQuery):
     
     filter_type = callback.data.split("_")[1]
     
-    # Получаем пользователей по фильтру
     if filter_type == "subscribed":
         users = db.get_users_by_filter("subscribed")
         filter_name = "подписанные"
@@ -2324,7 +2252,6 @@ async def handle_filter_subs(callback: types.CallbackQuery):
         await callback.answer(f"Нет пользователей с фильтром '{filter_name}'", show_alert=True)
         return
     
-    # Создаем инлайн-клавиатуру
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
     
     for user in users:
@@ -2391,7 +2318,6 @@ async def process_mailing_text(message: types.Message, state: FSMContext):
         await message.answer("❌ Создание рассылки отменено.", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
-    # Сохраняем текст рассылки
     await state.update_data(mailing_text=message.text)
     await state.set_state(ManualMailing.waiting_for_filter)
     
@@ -2423,7 +2349,6 @@ async def process_mailing_filter(message: types.Message, state: FSMContext):
     
     filter_type = filter_map[message.text]
     
-    # Получаем пользователей по фильтру
     users = db.get_users_by_filter(filter_type)
     
     if not users:
@@ -2476,7 +2401,6 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
     filter_type = data['filter_type']
     user_count = data['user_count']
     
-    # Получаем пользователей
     users = db.get_users_by_filter(filter_type)
     
     if not users:
@@ -2484,7 +2408,6 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
         await state.clear()
         return
     
-    # Создаем запись о рассылке
     mailing_id = db.create_manual_mailing(
         message.from_user.id,
         mailing_text,
@@ -2492,7 +2415,6 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
         json.dumps({"user_count": user_count})
     )
     
-    # Отправляем рассылку
     await message.answer(f"🔄 Начинаю отправку рассылки для {len(users)} пользователей...", parse_mode=ParseMode.HTML)
     
     success_count = 0
@@ -2500,17 +2422,14 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
     
     for user in users:
         try:
-            # Отправляем сообщение с клавиатурой для обратной связи
             sent_message = await bot.send_message(
                 user['user_id'], 
                 mailing_text, 
                 parse_mode=ParseMode.HTML
             )
             
-            # Сохраняем отправленное сообщение
             sent_message_id = db.save_sent_message(mailing_id, user['user_id'], sent_message.message_id)
             
-            # Отправляем клавиатуру для обратной связи отдельным сообщением
             feedback_keyboard = get_mailing_feedback_keyboard(sent_message_id)
             await bot.send_message(
                 user['user_id'],
@@ -2522,14 +2441,12 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
             
             success_count += 1
             
-            # Пауза, чтобы не превысить лимиты Telegram
             await asyncio.sleep(0.1)
             
         except Exception as e:
             logger.error(f"Не удалось отправить рассылку пользователю {user['user_id']}: {e}")
             failed_count += 1
     
-    # Обновляем статистику рассылки
     db.update_mailing_stats(mailing_id, success_count, failed_count)
     
     await message.answer(
@@ -2550,15 +2467,13 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
 async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMContext):
     """Обработка обратной связи по рассылке"""
     try:
-        # Парсим callback data
         parts = callback.data.split("_")
-        feedback_type = parts[1]  # like, dislike, comment, unsubscribe
+        feedback_type = parts[1]
         sent_message_id = int(parts[2])
         
         user_id = callback.from_user.id
         username = callback.from_user.username or "без username"
         
-        # Получаем информацию о сообщении
         conn = sqlite3.connect("tenders.db")
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -2580,10 +2495,8 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
         mailing_id = sent_message['mailing_id']
         
         if feedback_type == "unsubscribe":
-            # Отписываем пользователя
             db.toggle_user_mailing_subscription(user_id)
             
-            # Сохраняем отзыв
             db.save_mailing_feedback(
                 mailing_id, 
                 user_id, 
@@ -2592,7 +2505,6 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
                 "Пользователь отписался от рассылки"
             )
             
-            # Уведомляем пользователя
             await callback.message.edit_text(
                 callback.message.text + "\n\n✅ <b>Вы отписаны от рассылок</b>",
                 reply_markup=None,
@@ -2601,7 +2513,6 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
             
             await callback.answer("Вы отписаны от рассылок")
             
-            # Уведомляем администратора
             if ADMIN_ID:
                 try:
                     await bot.send_message(
@@ -2619,7 +2530,6 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
             return
         
         elif feedback_type == "comment":
-            # Запрашиваем комментарий
             await state.set_state(FeedbackComment.waiting_for_comment)
             await state.update_data(sent_message_id=sent_message_id, mailing_id=mailing_id)
             
@@ -2633,13 +2543,12 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
             await callback.answer()
             return
         
-        else:  # like или dislike
+        else:
             feedback_text_map = {
                 "like": "Понравилось",
                 "dislike": "Не понравилось"
             }
             
-            # Сохраняем отзыв
             db.save_mailing_feedback(
                 mailing_id, 
                 user_id, 
@@ -2648,7 +2557,6 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
                 feedback_text_map.get(feedback_type, "")
             )
             
-            # Обновляем сообщение
             feedback_icon = "👍" if feedback_type == "like" else "👎"
             await callback.message.edit_text(
                 callback.message.text + f"\n\n{feedback_icon} <b>Спасибо за ваш отзыв!</b>",
@@ -2658,7 +2566,6 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
             
             await callback.answer(f"Спасибо за ваш отзыв: {feedback_text_map.get(feedback_type, '')}")
             
-            # Уведомляем администратора
             if ADMIN_ID:
                 try:
                     feedback_type_text = "Понравилось" if feedback_type == "like" else "Не понравилось"
@@ -2694,7 +2601,6 @@ async def process_feedback_comment(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
     
-    # Сохраняем комментарий
     db.save_mailing_feedback(
         mailing_id, 
         user_id, 
@@ -2710,7 +2616,6 @@ async def process_feedback_comment(message: types.Message, state: FSMContext):
         parse_mode=ParseMode.HTML
     )
     
-    # Уведомляем администратора
     if ADMIN_ID:
         try:
             await bot.send_message(
@@ -2740,7 +2645,6 @@ async def show_feedback(message: types.Message):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Получаем последние рассылки с обратной связью
     cursor.execute('''
     SELECT mm.id, mm.mailing_text, mm.created_at, 
            mm.sent_count, mm.feedback_count,
@@ -2795,14 +2699,12 @@ async def handle_view_feedback(callback: types.CallbackQuery):
     
     mailing_id = int(callback.data.split("_")[2])
     
-    # Получаем обратную связь
     feedback = db.get_mailing_feedback(mailing_id)
     
     if not feedback:
         await callback.answer("Нет обратной связи по этой рассылке", show_alert=True)
         return
     
-    # Статистика по типам отзывов
     likes = sum(1 for f in feedback if f['feedback_type'] == 'like')
     dislikes = sum(1 for f in feedback if f['feedback_type'] == 'dislike')
     comments = sum(1 for f in feedback if f['feedback_type'] == 'comment')
@@ -2847,7 +2749,6 @@ async def handle_feedback_stats(callback: types.CallbackQuery):
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     
-    # Общая статистика
     cursor.execute('''
     SELECT 
         COUNT(*) as total_feedback,
@@ -2860,7 +2761,6 @@ async def handle_feedback_stats(callback: types.CallbackQuery):
     
     stats = cursor.fetchone()
     
-    # Статистика за 30 дней
     cursor.execute('''
     SELECT 
         COUNT(*) as recent_feedback,
@@ -2871,7 +2771,6 @@ async def handle_feedback_stats(callback: types.CallbackQuery):
     
     recent = cursor.fetchone()
     
-    # Самые популярные рассылки
     cursor.execute('''
     SELECT mm.id, mm.mailing_text, COUNT(mf.id) as feedback_count
     FROM manual_mailings mm
@@ -3095,16 +2994,13 @@ async def process_keywords(message: types.Message, state: FSMContext):
     username = message.from_user.username or "без username"
     
     try:
-        # Создаем заполненную анкету в формате Word
         anketa_path = create_filled_anketa(user_data)
         
         if anketa_path:
             try:
-                # Используем InputFile для отправки файла
                 with open(anketa_path, 'rb') as f:
                     file = InputFile(f, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
                     
-                    # Отправляем заполненную анкету пользователю
                     await bot.send_document(
                         user_id,
                         document=file,
@@ -3119,14 +3015,11 @@ async def process_keywords(message: types.Message, state: FSMContext):
                         parse_mode=ParseMode.HTML
                     )
                 
-                # Сохраняем анкету в БД с путем к файлу
                 questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
                 
                 if questionnaire_id:
-                    # Создаем задачу на выгрузку
                     export_id = db.create_tender_export(questionnaire_id, user_id)
                     
-                    # Определяем время отправки
                     if db.is_working_hours():
                         time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
                     else:
@@ -3141,12 +3034,10 @@ async def process_keywords(message: types.Message, state: FSMContext):
                         parse_mode=ParseMode.HTML
                     )
                     
-                    # Отправляем анкету администратору
                     await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username, anketa_path)
                     
                     logger.info(f"✅ Анкета #{questionnaire_id} сохранена, файл создан и отправлен администратору")
                     
-                    # Удаляем временный файл
                     try:
                         os.remove(anketa_path)
                         logger.info(f"Временный файл анкеты удален: {anketa_path}")
@@ -3162,7 +3053,6 @@ async def process_keywords(message: types.Message, state: FSMContext):
                 
             except Exception as e:
                 logger.error(f"❌ Ошибка отправки файла анкеты: {e}")
-                # Попробуем сохранить без файла
                 questionnaire_id = db.save_questionnaire(user_id, user_data)
                 
                 if questionnaire_id:
@@ -3185,7 +3075,6 @@ async def process_keywords(message: types.Message, state: FSMContext):
                     await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
                     logger.info(f"✅ Анкета #{questionnaire_id} сохранена (без файла) и отправлена администратору")
         else:
-            # Если не удалось создать файл, сохраняем без него
             questionnaire_id = db.save_questionnaire(user_id, user_data)
             
             if questionnaire_id:
@@ -3227,6 +3116,24 @@ async def process_keywords(message: types.Message, state: FSMContext):
     await state.clear()
 
 # =========== ЗАПУСК БОТА И HTTP СЕРВЕРА ===========
+async def start_http_server():
+    """Запуск HTTP сервера для Railway"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/status', status_check)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    
+    print(f"✅ HTTP сервер запущен на порту {PORT}")
+    print(f"✅ Health check доступен по пути: /")
+    print(f"✅ Статус бота: /status")
+    
+    return runner
+
 async def main():
     """Основная функция запуска"""
     print("\n" + "="*60)
@@ -3260,24 +3167,17 @@ async def main():
         print("⚠️ Проверьте токен бота")
         return
     
+    # Запускаем HTTP сервер
+    try:
+        http_runner = await start_http_server()
+    except Exception as e:
+        print(f"❌ Ошибка запуска HTTP сервера: {e}")
+        print("⚠️ Возможно, порт {PORT} уже занят")
+        return
+    
     # Запускаем задачу для follow-up сообщений
     asyncio.create_task(schedule_follow_ups())
     print("✅ Follow-up система запущена")
-    
-    # Создаем HTTP приложение для Railway healthcheck
-    app = web.Application()
-    app.router.add_get('/', health_check)
-    app.router.add_get('/status', status_check)
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    
-    print(f"✅ HTTP сервер запущен на порту {PORT}")
-    print(f"✅ Health check доступен по пути: /")
-    print(f"✅ Статус бота: /status")
     
     # Очищаем вебхуки
     await bot.delete_webhook(drop_pending_updates=True)
@@ -3303,7 +3203,8 @@ async def main():
         logger.error(f"Ошибка в работе бота: {e}")
         print(f"❌ Ошибка: {e}")
     finally:
-        await runner.cleanup()
+        # Очищаем ресурсы
+        await http_runner.cleanup()
         await bot.session.close()
         print("👋 Сессия бота закрыта")
 
