@@ -1106,7 +1106,7 @@ async def send_anketa_file(user_id: int):
                     "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>",
                     parse_mode=ParseMode.HTML
                 )
-                return False
+                return True
         
         # Проверяем размер файла
         file_size = os.path.getsize(ANKETA_LOCAL_PATH)
@@ -1121,24 +1121,46 @@ async def send_anketa_file(user_id: int):
                     "Файл анкеты поврежден. Попробуйте позже или заполните анкету онлайн.",
                     parse_mode=ParseMode.HTML
                 )
-                return False
+                return True
         
-        # Отправляем файл анкеты
-        file = FSInputFile(ANKETA_LOCAL_PATH, filename="Анкета_Тритика_шаблон.docx")
+        # Проверяем, можно ли открыть файл
+        try:
+            with open(ANKETA_LOCAL_PATH, 'rb') as f:
+                # Просто проверяем, что файл можно открыть
+                pass
+        except Exception as e:
+            logger.error(f"Файл анкеты не может быть открыт: {e}")
+            success = await download_anketa_file()
+            if not success:
+                await bot.send_message(
+                    user_id,
+                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                    "Файл анкеты поврежден. Попробуйте позже или заполните анкету онлайн.",
+                    parse_mode=ParseMode.HTML
+                )
+                return True
         
-        await bot.send_document(
-            user_id,
-            document=file,
-            caption=(
-                "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
-                "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
-            ),
-            parse_mode=ParseMode.HTML
-        )
+        # Отправляем файл анкеты используя правильный метод
+        with open(ANKETA_LOCAL_PATH, 'rb') as file:
+            # Создаем BufferedInputFile из байтов файла
+            input_file = BufferedInputFile(
+                file=file.read(),
+                filename="Анкета_Тритика_шаблон.docx"
+            )
+            
+            await bot.send_document(
+                chat_id=user_id,
+                document=input_file,
+                caption=(
+                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
         
         logger.info(f"✅ Файл анкеты успешно отправлен пользователю {user_id}")
         return True
@@ -1805,21 +1827,25 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
-            file = FSInputFile(file_path, filename=file_name)
-            
-            await bot.send_document(
-                user_id,
-                document=file,
-                caption=(
-                    f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                    f"🏢 <b>Компания:</b> {export['company_name']}\n"
-                    f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
-                    f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                    f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
-                ),
-                parse_mode=ParseMode.HTML
-            )
-            
+            with open(file_path, 'rb') as file:
+                input_file = BufferedInputFile(
+                    file=file.read(),
+                    filename=file_name
+                )
+                
+                await bot.send_document(
+                    user_id,
+                    document=input_file,
+                    caption=(
+                        f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
+                        f"🏢 <b>Компания:</b> {export['company_name']}\n"
+                        f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
+                        f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                        f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
+                
             db.mark_export_completed(export_id, callback.from_user.first_name)
             
             try:
@@ -3004,21 +3030,25 @@ async def process_keywords(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                file = FSInputFile(anketa_path, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
-                
-                await bot.send_document(
-                    user_id,
-                    document=file,
-                    caption=(
-                        "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
-                        "✅ <b>Вы можете:</b>\n"
-                        "1. Сохранить этот файл на компьютере\n"
-                        "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
-                        "3. Или мы обработаем ее автоматически\n\n"
-                        "<i>Анкета также отправлена менеджеру для обработки.</i>"
-                    ),
-                    parse_mode=ParseMode.HTML
-                )
+                with open(anketa_path, 'rb') as file:
+                    input_file = BufferedInputFile(
+                        file=file.read(),
+                        filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
+                    )
+                    
+                    await bot.send_document(
+                        user_id,
+                        document=input_file,
+                        caption=(
+                            "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
+                            "✅ <b>Вы можете:</b>\n"
+                            "1. Сохранить этот файл на компьютере\n"
+                            "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
+                            "3. Или мы обработаем ее автоматически\n\n"
+                            "<i>Анкета также отправлена менеджеру для обработки.</i>"
+                        ),
+                        parse_mode=ParseMode.HTML
+                    )
                 
                 questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
                 
