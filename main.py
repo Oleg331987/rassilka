@@ -112,7 +112,7 @@ def create_filled_anketa(user_data: dict) -> Optional[str]:
         # Подвал
         doc.add_page_break()
         doc.add_paragraph('\n\n')
-        doc.add_paragraph('Анкета заполнена через Telegram-бота Тритика')
+        doc.add_paragraph('Анкета заполена через Telegram-бота Тритика')
         doc.add_paragraph('https://t.me/tritika_tender_bot')
         
         # Сохраняем во временный файл
@@ -1087,72 +1087,39 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         logger.error(f"Ошибка при отправке анкеты администратору: {e}")
 
 # =========== ФУНКЦИЯ ОТПРАВКИ ФАЙЛА ANKETA.DOCX ===========
-async def send_anketa_file(user_id: int):
+async def send_anketa_file(message: types.Message, file_path: str):
     """Отправка файла анкеты пользователю"""
     try:
-        # Проверяем наличие файла локально
-        if not os.path.exists(ANKETA_LOCAL_PATH):
-            logger.warning(f"Файл анкеты не найден локально: {ANKETA_LOCAL_PATH}")
-            # Пробуем скачать с GitHub
-            success = await download_anketa_file()
-            if not success:
-                # Если не удалось скачать, отправляем ссылку на GitHub
-                await bot.send_message(
-                    user_id,
-                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                    f"Скачать анкету можно по ссылке:\n{ANKETA_GITHUB_URL}\n\n"
-                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
-                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>",
-                    parse_mode=ParseMode.HTML
-                )
-                return True
+        # Проверяем наличие файла
+        if not os.path.exists(file_path):
+            logger.error(f"Файл не найден: {file_path}")
+            await message.answer("❌ Файл анкеты не найден. Попробуйте позже.")
+            return False
         
-        # Проверяем размер файла
-        file_size = os.path.getsize(ANKETA_LOCAL_PATH)
-        if file_size == 0:
-            logger.warning(f"Файл анкеты пустой: {ANKETA_LOCAL_PATH}")
-            # Пробуем перескачать
-            success = await download_anketa_file()
-            if not success:
-                await bot.send_message(
-                    user_id,
-                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                    "Файл анкеты поврежден. Попробуйте позже или заполните анкету онлайн.",
-                    parse_mode=ParseMode.HTML
-                )
-                return True
+        # Используем простой способ отправки файла
+        input_file = types.InputFile(file_path, filename="Анкета_Тритика_шаблон.docx")
         
-        # Отправляем файл анкеты используя самый простой и надежный способ
-        # Читаем файл в бинарном режиме и используем types.InputFile
-        with open(ANKETA_LOCAL_PATH, 'rb') as file:
-            input_file = types.InputFile(file, filename="Анкета_Тритика_шаблон.docx")
-            
-            await bot.send_document(
-                chat_id=user_id,
-                document=input_file,
-                caption=(
-                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
-                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
-                ),
-                parse_mode=ParseMode.HTML
-            )
+        await message.answer_document(
+            document=input_file,
+            caption=(
+                "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+            ),
+            parse_mode=ParseMode.HTML
+        )
         
-        logger.info(f"✅ Файл анкеты успешно отправлен пользователю {user_id}")
+        logger.info(f"✅ Файл анкеты успешно отправлен пользователю {message.from_user.id}")
         return True
         
     except Exception as e:
-        logger.error(f"Ошибка при отправке файла анкеты: {e}", exc_info=True)
+        logger.error(f"Ошибка при отправке файла анкеты: {e}")
         
         # Если не удалось отправить файл, отправляем ссылку
-        await bot.send_message(
-            user_id,
+        await message.answer(
             f"📄 <b>Шаблон анкеты для заполнения</b>\n\n"
             f"Скачать анкету можно по ссылке:\n{ANKETA_GITHUB_URL}\n\n"
             "Вы можете заполнить эту анкету и отправить нам:\n\n"
@@ -1340,8 +1307,28 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
     
     await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>", parse_mode=ParseMode.HTML)
     
+    # Проверяем наличие файла локально
+    if not os.path.exists(ANKETA_LOCAL_PATH):
+        logger.warning(f"Файл анкеты не найден локально: {ANKETA_LOCAL_PATH}")
+        # Пробуем скачать с GitHub
+        success = await download_anketa_file()
+        if not success:
+            # Если не удалось скачать, отправляем ссылку на GitHub
+            await message.answer(
+                f"📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                f"Скачать анкету можно по ссылке:\n{ANKETA_GITHUB_URL}\n\n"
+                "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>",
+                reply_markup=get_main_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+            return
+    
     # Отправляем файл анкеты
-    sent = await send_anketa_file(message.from_user.id)
+    sent = await send_anketa_file(message, ANKETA_LOCAL_PATH)
     
     if sent:
         await message.answer(
@@ -3014,8 +3001,7 @@ async def process_keywords(message: types.Message, state: FSMContext):
                 with open(anketa_path, 'rb') as file:
                     input_file = types.InputFile(file, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
                     
-                    await bot.send_document(
-                        user_id,
+                    await message.answer_document(
                         document=input_file,
                         caption=(
                             "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
