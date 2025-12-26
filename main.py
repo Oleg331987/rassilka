@@ -1067,14 +1067,16 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         """
         
         if anketa_path and os.path.exists(anketa_path):
-            file = FSInputFile(anketa_path, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
-            
-            await bot.send_document(
-                ADMIN_ID,
-                document=file,
-                caption=admin_message,
-                parse_mode=ParseMode.HTML
-            )
+            # Используем простой способ отправки файла
+            with open(anketa_path, 'rb') as file:
+                input_file = types.InputFile(file, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
+                
+                await bot.send_document(
+                    ADMIN_ID,
+                    document=input_file,
+                    caption=admin_message,
+                    parse_mode=ParseMode.HTML
+                )
             
             logger.info(f"Анкета #{questionnaire_id} с файлом отправлена администратору {ADMIN_ID}")
         else:
@@ -1123,30 +1125,10 @@ async def send_anketa_file(user_id: int):
                 )
                 return True
         
-        # Проверяем, можно ли открыть файл
-        try:
-            with open(ANKETA_LOCAL_PATH, 'rb') as f:
-                # Просто проверяем, что файл можно открыть
-                pass
-        except Exception as e:
-            logger.error(f"Файл анкеты не может быть открыт: {e}")
-            success = await download_anketa_file()
-            if not success:
-                await bot.send_message(
-                    user_id,
-                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                    "Файл анкеты поврежден. Попробуйте позже или заполните анкету онлайн.",
-                    parse_mode=ParseMode.HTML
-                )
-                return True
-        
-        # Отправляем файл анкеты используя правильный метод
+        # Отправляем файл анкеты используя самый простой и надежный способ
+        # Читаем файл в бинарном режиме и используем types.InputFile
         with open(ANKETA_LOCAL_PATH, 'rb') as file:
-            # Создаем BufferedInputFile из байтов файла
-            input_file = BufferedInputFile(
-                file=file.read(),
-                filename="Анкета_Тритика_шаблон.docx"
-            )
+            input_file = types.InputFile(file, filename="Анкета_Тритика_шаблон.docx")
             
             await bot.send_document(
                 chat_id=user_id,
@@ -1827,11 +1809,9 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
+            # Используем простой способ отправки файла
             with open(file_path, 'rb') as file:
-                input_file = BufferedInputFile(
-                    file=file.read(),
-                    filename=file_name
-                )
+                input_file = types.InputFile(file, filename=file_name)
                 
                 await bot.send_document(
                     user_id,
@@ -3030,11 +3010,9 @@ async def process_keywords(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
+                # Используем простой способ отправки файла
                 with open(anketa_path, 'rb') as file:
-                    input_file = BufferedInputFile(
-                        file=file.read(),
-                        filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
-                    )
+                    input_file = types.InputFile(file, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
                     
                     await bot.send_document(
                         user_id,
