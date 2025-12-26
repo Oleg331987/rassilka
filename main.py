@@ -23,7 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove, BufferedInputFile, FSInputFile
+    ReplyKeyboardRemove, BufferedInputFile, InputFile, FSInputFile
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -1084,19 +1084,22 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         
         # Отправляем администратору
         if anketa_path and os.path.exists(anketa_path):
-            # Используем FSInputFile для отправки файла
-            file = FSInputFile(anketa_path, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
+            # Используем InputFile для отправки файла
+            with open(anketa_path, 'rb') as f:
+                file = InputFile(f, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
+                
+                # Отправляем с файлом
+                await bot.send_document(
+                    ADMIN_ID,
+                    document=file,
+                    caption=admin_message,
+                    parse_mode=ParseMode.HTML
+                )
             
-            # Отправляем с файлом
-            await bot.send_document(
-                ADMIN_ID,
-                document=file,
-                caption=admin_message
-            )
             logger.info(f"Анкета #{questionnaire_id} с файлом отправлена администратору {ADMIN_ID}")
         else:
             # Отправляем только текст
-            await bot.send_message(ADMIN_ID, admin_message)
+            await bot.send_message(ADMIN_ID, admin_message, parse_mode=ParseMode.HTML)
             logger.info(f"Анкета #{questionnaire_id} отправлена администратору {ADMIN_ID}")
         
     except Exception as e:
@@ -1133,27 +1136,29 @@ async def send_anketa_file(user_id: int):
             )
             return False
         
-        # Используем FSInputFile для отправки файла
-        file = FSInputFile(ANKETA_LOCAL_PATH, filename="Анкета_Тритика_шаблон.docx")
+        # Используем InputFile для отправки файла
+        with open(ANKETA_LOCAL_PATH, 'rb') as f:
+            file = InputFile(f, filename="Анкета_Тритика_шаблон.docx")
+            
+            await bot.send_document(
+                user_id,
+                document=file,
+                caption=(
+                    "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
+                    "Вы можете заполнить эту анкету и отправить нам:\n\n"
+                    "1. 📧 <b>На email:</b> info@tritika.ru\n"
+                    "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                    "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
+                    "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
         
-        await bot.send_document(
-            user_id,
-            document=file,
-            caption=(
-                "📄 <b>Шаблон анкеты для заполнения</b>\n\n"
-                "Вы можете заполнить эту анкету и отправить нам:\n\n"
-                "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
-                "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
-                "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>"
-            ),
-            parse_mode=ParseMode.HTML
-        )
         logger.info(f"✅ Файл анкеты успешно отправлен пользователю {user_id}")
         return True
         
     except Exception as e:
-        logger.error(f"Ошибка при отправке файла анкеты: {e}")
+        logger.error(f"Ошибка при отправке файла анкеты: {e}", exc_info=True)
         await bot.send_message(
             user_id,
             "❌ Произошла ошибка при отправке файла. Попробуйте позже или свяжитесь с поддержкой.",
@@ -1178,7 +1183,8 @@ async def send_follow_up_messages():
                     user_id,
                     f"📨 <b>Подборка тендеров отправлена!</b>\n\n"
                     f"Удалось ли найти что-то подходящее?",
-                    reply_markup=get_follow_up_keyboard(export_id)
+                    reply_markup=get_follow_up_keyboard(export_id),
+                    parse_mode=ParseMode.HTML
                 )
                 
                 # Отмечаем, что follow-up отправлен
@@ -1222,7 +1228,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
             "🛠️ <b>Панель администратора Тритика</b>\n\n"
             "Вы вошли как администратор бота.\n"
             "Используйте кнопки ниже для управления.",
-            reply_markup=get_admin_keyboard()
+            reply_markup=get_admin_keyboard(),
+            parse_mode=ParseMode.HTML
         )
     else:
         await message.answer(
@@ -1230,7 +1237,8 @@ async def cmd_start(message: types.Message, state: FSMContext):
             "Помогаю организациям находить выгодные тендеры. "
             "Хотите бесплатно получить подборку тендеров по вашей сфере? "
             "Вам надо лишь заполнить короткую анкету.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
         )
     
     logger.info(f"Пользователь {user_id} нажал /start")
@@ -1252,7 +1260,8 @@ async def cmd_help(message: types.Message):
         "• Консультация по участию в тендерах\n\n"
         "<b>Контакты поддержки:</b>\n"
         "📧 info@tritika.ru\n"
-        "📱 +7 (904) 653-69-87"
+        "📱 +7 (904) 653-69-87",
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(Command("my_exports"))
@@ -1277,7 +1286,8 @@ async def cmd_my_exports(message: types.Message):
         await message.answer(
             "📭 У вас пока нет выгрузок тендеров.\n\n"
             "Хотите получить бесплатную подборку? Заполните анкету!",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
         )
         return
     
@@ -1297,7 +1307,7 @@ async def cmd_my_exports(message: types.Message):
         
         response += "\n"
     
-    await message.answer(response)
+    await message.answer(response, parse_mode=ParseMode.HTML)
 
 @dp.message(Command("admin"))
 async def cmd_admin(message: types.Message, state: FSMContext):
@@ -1308,10 +1318,11 @@ async def cmd_admin(message: types.Message, state: FSMContext):
         await state.clear()
         await message.answer(
             "🔐 <b>Вы авторизованы как администратор</b>",
-            reply_markup=get_admin_keyboard()
+            reply_markup=get_admin_keyboard(),
+            parse_mode=ParseMode.HTML
         )
     else:
-        await message.answer("⛔ У вас нет прав доступа к панели администратора.")
+        await message.answer("⛔ У вас нет прав доступа к панели администратора.", parse_mode=ParseMode.HTML)
 
 # =========== ОБРАБОТЧИКИ КНОПОК ===========
 @dp.message(F.text == "📝 Заполнить анкету онлайн")
@@ -1323,7 +1334,8 @@ async def start_online_questionnaire(message: types.Message, state: FSMContext):
     await message.answer(
         "📝 <b>Заполнение анкеты онлайн</b>\n\n"
         "Заполнение займет 3-5 минут. Введите ваше <b>ФИО полностью</b>:",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_cancel_keyboard(),
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_name)
 
@@ -1332,17 +1344,18 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
     """Скачать анкету в Word"""
     await state.clear()
     
-    await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>")
+    await message.answer("📄 <b>Отправляю вам шаблон анкеты...</b>", parse_mode=ParseMode.HTML)
     
     # Пытаемся скачать файл, если его нет
     if not os.path.exists(ANKETA_LOCAL_PATH) or os.path.getsize(ANKETA_LOCAL_PATH) == 0:
-        await message.answer("🔄 Файл анкеты не найден, скачиваю с GitHub...")
+        await message.answer("🔄 Файл анкеты не найден, скачиваю с GitHub...", parse_mode=ParseMode.HTML)
         success = await download_anketa_file()
         if not success:
             await message.answer(
                 "❌ Не удалось скачать файл анкеты. Пожалуйста, попробуйте позже.\n\n"
                 "Вы можете заполнить анкету онлайн через соответствующую кнопку.",
-                reply_markup=get_main_keyboard()
+                reply_markup=get_main_keyboard(),
+                parse_mode=ParseMode.HTML
             )
             return
     
@@ -1357,12 +1370,14 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
             "2. Сохраните файл\n"
             "3. Отправьте его менеджеру через кнопку <b>'Написать менеджеру'</b>\n\n"
             "Или вы можете заполнить анкету прямо здесь через <b>'Заполнить анкету онлайн'</b>",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
         )
     else:
         await message.answer(
             "❌ Не удалось отправить файл анкеты. Попробуйте позже или свяжитесь с поддержкой.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
         )
 
 @dp.message(F.text == "📤 Написать менеджеру")
@@ -1377,7 +1392,8 @@ async def start_manager_dialog(message: types.Message, state: FSMContext):
         "• Документы\n"
         "• Фотографии\n\n"
         "<i>Мы получим ваше сообщение и ответим в ближайшее время.</i>",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_cancel_keyboard(),
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(F.text == "📊 Мои выгрузки")
@@ -1400,7 +1416,8 @@ async def show_contacts(message: types.Message):
         "<b>Время работы:</b>\n"
         "Пн-Чт: 8:30-17:30\n"
         "Пт: 8:30-16:30\n"
-        "Сб-Вс: выходные"
+        "Сб-Вс: выходные",
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(F.text == "ℹ️ Помощь")
@@ -1424,24 +1441,26 @@ async def cancel_action(message: types.Message, state: FSMContext):
         is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
         
         if is_admin:
-            await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard())
+            await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         else:
             await message.answer(
                 "❌ Действие отменено.\n\n"
                 "Вы можете выбрать другое действие.",
-                reply_markup=get_main_keyboard()
+                reply_markup=get_main_keyboard(),
+                parse_mode=ParseMode.HTML
             )
     else:
         await state.clear()
         is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
         
         if is_admin:
-            await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard())
+            await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         else:
             await message.answer(
                 "❌ Заполнение анкеты отменено.\n\n"
                 "Вы можете начать заполнение заново в любое время.",
-                reply_markup=get_main_keyboard()
+                reply_markup=get_main_keyboard(),
+                parse_mode=ParseMode.HTML
             )
 
 # =========== ДИАЛОГ С МЕНЕДЖЕРОМ ===========
@@ -1468,7 +1487,7 @@ async def process_manager_message(message: types.Message, state: FSMContext):
     elif message.text:
         message_text = message.text
     else:
-        await message.answer("❌ Извините, я могу принимать только текст, документы и фотографии.")
+        await message.answer("❌ Извините, я могу принимать только текст, документы и фотографии.", parse_mode=ParseMode.HTML)
         return
     
     # Сохраняем сообщение в БД
@@ -1500,14 +1519,14 @@ async def process_manager_message(message: types.Message, state: FSMContext):
             
             # Отправляем администратору
             keyboard = get_manager_response_keyboard(message_id)
-            await bot.send_message(ADMIN_ID, admin_message, reply_markup=keyboard)
+            await bot.send_message(ADMIN_ID, admin_message, reply_markup=keyboard, parse_mode=ParseMode.HTML)
             
             # Если есть файл - пересылаем его
             if file_id:
                 if message_type == "document":
-                    await bot.send_document(ADMIN_ID, file_id, caption=f"Документ от пользователя {user_id}")
+                    await bot.send_document(ADMIN_ID, file_id, caption=f"Документ от пользователя {user_id}", parse_mode=ParseMode.HTML)
                 elif message_type == "photo":
-                    await bot.send_photo(ADMIN_ID, file_id, caption=f"Фото от пользователя {user_id}")
+                    await bot.send_photo(ADMIN_ID, file_id, caption=f"Фото от пользователя {user_id}", parse_mode=ParseMode.HTML)
             
         except Exception as e:
             logger.error(f"Не удалось отправить уведомление админу: {e}")
@@ -1516,7 +1535,8 @@ async def process_manager_message(message: types.Message, state: FSMContext):
         "✅ <b>Ваше сообщение отправлено менеджеру!</b>\n\n"
         "Мы получили ваше сообщение и свяжемся с вами в ближайшее время.\n\n"
         "<i>Обычно мы отвечаем в течение 15 минут в рабочее время.</i>",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.HTML
     )
     
     await state.clear()
@@ -1561,7 +1581,7 @@ async def handle_call_callback(callback: types.CallbackQuery):
     else:
         response = "❌ У пользователя не указан телефон в анкете."
     
-    await callback.message.answer(response)
+    await callback.message.answer(response, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("write_"))
@@ -1607,7 +1627,7 @@ async def handle_write_callback(callback: types.CallbackQuery):
         response += f"🆔 <b>ID:</b> {message['user_id']}\n"
         response += f"🔗 <b>Ссылка:</b> tg://user?id={message['user_id']}"
     
-    await callback.message.answer(response)
+    await callback.message.answer(response, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 @dp.callback_query(F.data.startswith("done_"))
@@ -1635,7 +1655,8 @@ async def handle_done_callback(callback: types.CallbackQuery):
     # Обновляем сообщение
     await callback.message.edit_text(
         callback.message.text + "\n\n✅ <b>ОБРАБОТАНО</b>",
-        reply_markup=None
+        reply_markup=None,
+        parse_mode=ParseMode.HTML
     )
     
     await callback.answer("Сообщение отмечено как обработанное")
@@ -1645,7 +1666,7 @@ async def handle_done_callback(callback: types.CallbackQuery):
 async def show_new_questionnaires(message: types.Message):
     """Показать новые анкеты"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     conn = sqlite3.connect("tenders.db")
@@ -1665,7 +1686,7 @@ async def show_new_questionnaires(message: types.Message):
     conn.close()
     
     if not questionnaires:
-        await message.answer("📭 Новых анкет нет")
+        await message.answer("📭 Новых анкет нет", parse_mode=ParseMode.HTML)
         return
     
     response = f"🆕 <b>Новые анкеты ({len(questionnaires)}):</b>\n\n"
@@ -1679,13 +1700,13 @@ async def show_new_questionnaires(message: types.Message):
         response += f"🎯 {q['activity'][:30]}...\n"
         response += f"⏰ {date_str}\n\n"
     
-    await message.answer(response)
+    await message.answer(response, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "📤 Отправить выгрузку")
 async def start_send_export(message: types.Message, state: FSMContext):
     """Начало отправки выгрузки пользователю"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     await state.set_state(SendExport.waiting_for_questionnaire_id)
@@ -1693,7 +1714,8 @@ async def start_send_export(message: types.Message, state: FSMContext):
         "📤 <b>Отправка выгрузки пользователю</b>\n\n"
         "Введите ID анкеты для которой нужно отправить выгрузку:\n"
         "<i>(ID можно взять из списка новых анкет)</i>",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_cancel_keyboard(),
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(SendExport.waiting_for_questionnaire_id)
@@ -1701,11 +1723,11 @@ async def process_export_questionnaire_id(message: types.Message, state: FSMCont
     """Обработка ID анкеты для отправки выгрузки"""
     if message.text == "❌ Отмена":
         await state.clear()
-        await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard())
+        await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
     if not message.text.isdigit():
-        await message.answer("❌ Пожалуйста, введите числовой ID анкеты")
+        await message.answer("❌ Пожалуйста, введите числовой ID анкеты", parse_mode=ParseMode.HTML)
         return
     
     questionnaire_id = int(message.text)
@@ -1714,7 +1736,7 @@ async def process_export_questionnaire_id(message: types.Message, state: FSMCont
     questionnaire = db.get_questionnaire_by_id(questionnaire_id)
     
     if not questionnaire:
-        await message.answer("❌ Анкета с таким ID не найдена")
+        await message.answer("❌ Анкета с таким ID не найдена", parse_mode=ParseMode.HTML)
         return
     
     await state.update_data(questionnaire_id=questionnaire_id)
@@ -1727,7 +1749,8 @@ async def process_export_questionnaire_id(message: types.Message, state: FSMCont
         f"📧 <b>Email:</b> {questionnaire['email']}\n\n"
         f"Теперь отправьте файл с выгрузкой тендеров:\n"
         f"<i>(Поддерживаются файлы: PDF, Excel, Word, ZIP, RAR)</i>",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_cancel_keyboard(),
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(SendExport.waiting_for_export_file)
@@ -1735,24 +1758,24 @@ async def process_export_file(message: types.Message, state: FSMContext):
     """Обработка файла выгрузки"""
     if message.text == "❌ Отмена":
         await state.clear()
-        await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard())
+        await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
     if not message.document:
-        await message.answer("❌ Пожалуйста, отправьте файл с выгрузкой")
+        await message.answer("❌ Пожалуйста, отправьте файл с выгрузкой", parse_mode=ParseMode.HTML)
         return
     
     data = await state.get_data()
     questionnaire_id = data.get('questionnaire_id')
     
     if not questionnaire_id:
-        await message.answer("❌ Ошибка: ID анкеты не найден")
+        await message.answer("❌ Ошибка: ID анкеты не найден", parse_mode=ParseMode.HTML)
         await state.clear()
         return
     
     questionnaire = db.get_questionnaire_by_id(questionnaire_id)
     if not questionnaire:
-        await message.answer("❌ Анкета не найдена")
+        await message.answer("❌ Анкета не найдена", parse_mode=ParseMode.HTML)
         await state.clear()
         return
     
@@ -1792,12 +1815,13 @@ async def process_export_file(message: types.Message, state: FSMContext):
             f"📧 <b>Email:</b> {questionnaire['email']}\n"
             f"🆔 <b>ID выгрузки:</b> {export_id}\n\n"
             f"<i>Подтвердите отправку выгрузки пользователю.</i>",
-            reply_markup=keyboard
+            reply_markup=keyboard,
+            parse_mode=ParseMode.HTML
         )
         
     except Exception as e:
         logger.error(f"Ошибка обработки файла выгрузки: {e}")
-        await message.answer(f"❌ Ошибка обработки файла: {e}")
+        await message.answer(f"❌ Ошибка обработки файла: {e}", parse_mode=ParseMode.HTML)
     
     await state.clear()
 
@@ -1824,20 +1848,22 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
         if file_path and os.path.exists(file_path):
-            # Используем FSInputFile для отправки файла
-            file = FSInputFile(file_path, filename=file_name)
-            
-            await bot.send_document(
-                user_id,
-                document=file,
-                caption=(
-                    f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                    f"🏢 <b>Компания:</b> {export['company_name']}\n"
-                    f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
-                    f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                    f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
+            # Используем InputFile для отправки файла
+            with open(file_path, 'rb') as f:
+                file = InputFile(f, filename=file_name)
+                
+                await bot.send_document(
+                    user_id,
+                    document=file,
+                    caption=(
+                        f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
+                        f"🏢 <b>Компания:</b> {export['company_name']}\n"
+                        f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
+                        f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                        f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
+                    ),
+                    parse_mode=ParseMode.HTML
                 )
-            )
             
             # Обновляем статус выгрузки
             db.mark_export_completed(export_id, callback.from_user.first_name)
@@ -1850,7 +1876,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             
             await callback.message.edit_text(
                 callback.message.text + "\n\n✅ <b>ВЫГРУЗКА ОТПРАВЛЕНА</b>",
-                reply_markup=None
+                reply_markup=None,
+                parse_mode=ParseMode.HTML
             )
             
             # Отправляем подтверждение админу
@@ -1859,7 +1886,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 f"👤 Пользователь: {export['full_name']}\n"
                 f"🏢 Компания: {export['company_name']}\n"
                 f"📄 Файл: {file_name}\n\n"
-                f"<i>Через 1 час пользователь получит follow-up сообщение.</i>"
+                f"<i>Через 1 час пользователь получит follow-up сообщение.</i>",
+                parse_mode=ParseMode.HTML
             )
             
         else:
@@ -1895,7 +1923,8 @@ async def handle_cancel_export(callback: types.CallbackQuery):
     
     await callback.message.edit_text(
         callback.message.text + "\n\n❌ <b>ОТПРАВКА ОТМЕНЕНА</b>",
-        reply_markup=None
+        reply_markup=None,
+        parse_mode=ParseMode.HTML
     )
     
     await callback.answer("Отправка выгрузки отменена")
@@ -1904,7 +1933,7 @@ async def handle_cancel_export(callback: types.CallbackQuery):
 async def show_statistics(message: types.Message):
     """Показать статистику"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     stats = db.get_statistics(14)
@@ -1933,7 +1962,7 @@ async def show_statistics(message: types.Message):
 {datetime.now().strftime('%d.%m.%Y %H:%M')}
 """
     
-    await message.answer(response)
+    await message.answer(response, parse_mode=ParseMode.HTML)
 
 # =========== ОБРАБОТЧИКИ FOLLOW-UP СООБЩЕНИЙ ===========
 @dp.callback_query(F.data.startswith("follow_"))
@@ -1966,7 +1995,8 @@ async def handle_follow_up_response(callback: types.CallbackQuery):
         
         await callback.message.edit_text(
             callback.message.text + f"\n\n✅ <b>Спасибо за ваш ответ!</b>\n{thank_you_text.get(response_type, '')}",
-            reply_markup=None
+            reply_markup=None,
+            parse_mode=ParseMode.HTML
         )
         
         # Уведомляем администратора
@@ -1981,7 +2011,8 @@ async def handle_follow_up_response(callback: types.CallbackQuery):
                         f"🆔 ID: {user_id}\n"
                         f"🏢 Компания: {export['company_name']}\n"
                         f"💬 Ответ: {response_text}\n"
-                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
+                        parse_mode=ParseMode.HTML
                     )
             except Exception as e:
                 logger.error(f"Не удалось уведомить админа о follow-up: {e}")
@@ -1997,14 +2028,14 @@ async def handle_follow_up_response(callback: types.CallbackQuery):
 async def manage_subscriptions(message: types.Message):
     """Управление подписками пользователей"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     # Получаем пользователей
     users = db.get_all_users_with_subscription(30)
     
     if not users:
-        await message.answer("👥 Пользователей нет")
+        await message.answer("👥 Пользователей нет", parse_mode=ParseMode.HTML)
         return
     
     # Создаем инлайн-клавиатуру для управления
@@ -2047,7 +2078,8 @@ async def manage_subscriptions(message: types.Message):
         "❌ - отписан от рассылки\n"
         "📋 - заполнил анкету\n"
         "📭 - без анкеты",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
     )
 
 @dp.callback_query(F.data.startswith("manage_user_"))
@@ -2078,7 +2110,8 @@ async def handle_manage_user(callback: types.CallbackQuery):
         f"<b>ID:</b> {user_id}\n"
         f"<b>Текущий статус:</b> {'✅ Подписан на рассылку' if user_info['subscribed'] else '❌ Отписан от рассылки'}\n\n"
         f"<i>Используйте кнопки ниже для управления:</i>",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
     )
     
     await callback.answer()
@@ -2117,7 +2150,8 @@ async def handle_toggle_subscription(callback: types.CallbackQuery):
         f"<b>ID:</b> {user_id}\n"
         f"<b>Текущий статус:</b> {'✅ Подписан на рассылку' if new_status else '❌ Отписан от рассылки'}\n\n"
         f"<i>Статус успешно обновлен!</i>",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
     )
     
     await callback.answer(f"Статус подписки изменен: {'✅ Подписан' if new_status else '❌ Отписан'}")
@@ -2198,7 +2232,7 @@ async def handle_user_stats(callback: types.CallbackQuery):
             fb_type = "👍" if fb['feedback_type'] == 'like' else "👎" if fb['feedback_type'] == 'dislike' else "💬" if fb['feedback_type'] == 'comment' else "🚫"
             response += f"{i}. {fb_type} {fb['feedback_text'] or fb['feedback_type']} ({fb['created_at'][:16]})\n"
     
-    await callback.message.answer(response)
+    await callback.message.answer(response, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 @dp.callback_query(F.data == "subscription_stats")
@@ -2257,7 +2291,7 @@ async def handle_subscription_stats(callback: types.CallbackQuery):
 • Всего отписок: {recent['recent_unsubscribes']}
 """
     
-    await callback.message.answer(response)
+    await callback.message.answer(response, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 @dp.callback_query(F.data == "refresh_subs")
@@ -2325,7 +2359,8 @@ async def handle_filter_subs(callback: types.CallbackQuery):
         "❌ - отписан от рассылки\n"
         "📋 - заполнил анкету\n"
         "📭 - без анкеты",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
     )
     
     await callback.answer()
@@ -2335,7 +2370,7 @@ async def handle_filter_subs(callback: types.CallbackQuery):
 async def start_create_mailing(message: types.Message, state: FSMContext):
     """Начало создания ручной рассылки"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     await state.set_state(ManualMailing.waiting_for_text)
@@ -2344,7 +2379,8 @@ async def start_create_mailing(message: types.Message, state: FSMContext):
         "Введите текст рассылки. Вы можете использовать HTML-разметку:\n"
         "<b>жирный</b>, <i>курсив</i>, <code>код</code>\n\n"
         "<i>Для отмены нажмите '❌ Отмена'</i>",
-        reply_markup=get_cancel_keyboard()
+        reply_markup=get_cancel_keyboard(),
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(ManualMailing.waiting_for_text)
@@ -2352,7 +2388,7 @@ async def process_mailing_text(message: types.Message, state: FSMContext):
     """Обработка текста рассылки"""
     if message.text == "❌ Отмена":
         await state.clear()
-        await message.answer("❌ Создание рассылки отменено.", reply_markup=get_admin_keyboard())
+        await message.answer("❌ Создание рассылки отменено.", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
     # Сохраняем текст рассылки
@@ -2362,7 +2398,8 @@ async def process_mailing_text(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ <b>Текст рассылки сохранен</b>\n\n"
         "Теперь выберите категорию пользователей для рассылки:",
-        reply_markup=get_mailing_filters_keyboard()
+        reply_markup=get_mailing_filters_keyboard(),
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(ManualMailing.waiting_for_filter)
@@ -2370,7 +2407,7 @@ async def process_mailing_filter(message: types.Message, state: FSMContext):
     """Обработка фильтра для рассылки"""
     if message.text == "❌ Отмена":
         await state.clear()
-        await message.answer("❌ Создание рассылки отменено.", reply_markup=get_admin_keyboard())
+        await message.answer("❌ Создание рассылки отменено.", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
     filter_map = {
@@ -2381,7 +2418,7 @@ async def process_mailing_filter(message: types.Message, state: FSMContext):
     }
     
     if message.text not in filter_map:
-        await message.answer("❌ Пожалуйста, выберите категорию из предложенных кнопок.")
+        await message.answer("❌ Пожалуйста, выберите категорию из предложенных кнопок.", parse_mode=ParseMode.HTML)
         return
     
     filter_type = filter_map[message.text]
@@ -2393,7 +2430,8 @@ async def process_mailing_filter(message: types.Message, state: FSMContext):
         await message.answer(
             f"❌ Нет пользователей по выбранному фильтру: {message.text}\n"
             "Попробуйте выбрать другую категорию.",
-            reply_markup=get_mailing_filters_keyboard()
+            reply_markup=get_mailing_filters_keyboard(),
+            parse_mode=ParseMode.HTML
         )
         return
     
@@ -2417,7 +2455,8 @@ async def process_mailing_filter(message: types.Message, state: FSMContext):
         f"<b>Категория:</b> {message.text}\n"
         f"<b>Количество пользователей:</b> {len(users)}\n\n"
         f"<i>Отправить рассылку?</i>",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(ManualMailing.waiting_for_confirmation)
@@ -2425,11 +2464,11 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
     """Подтверждение и отправка рассылки С ОБРАТНОЙ СВЯЗЬЮ"""
     if message.text == "❌ Нет, отменить":
         await state.clear()
-        await message.answer("❌ Рассылка отменена.", reply_markup=get_admin_keyboard())
+        await message.answer("❌ Рассылка отменена.", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
     if message.text != "✅ Да, отправить":
-        await message.answer("❌ Пожалуйста, используйте кнопки для подтверждения.")
+        await message.answer("❌ Пожалуйста, используйте кнопки для подтверждения.", parse_mode=ParseMode.HTML)
         return
     
     data = await state.get_data()
@@ -2441,7 +2480,7 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
     users = db.get_users_by_filter(filter_type)
     
     if not users:
-        await message.answer("❌ Ошибка: пользователи не найдены.", reply_markup=get_admin_keyboard())
+        await message.answer("❌ Ошибка: пользователи не найдены.", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         await state.clear()
         return
     
@@ -2454,7 +2493,7 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
     )
     
     # Отправляем рассылку
-    await message.answer(f"🔄 Начинаю отправку рассылки для {len(users)} пользователей...")
+    await message.answer(f"🔄 Начинаю отправку рассылки для {len(users)} пользователей...", parse_mode=ParseMode.HTML)
     
     success_count = 0
     failed_count = 0
@@ -2477,7 +2516,8 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
                 user['user_id'],
                 "💬 <b>Как вам эта рассылка?</b>\n\n"
                 "Пожалуйста, оставьте обратную связь:",
-                reply_markup=feedback_keyboard
+                reply_markup=feedback_keyboard,
+                parse_mode=ParseMode.HTML
             )
             
             success_count += 1
@@ -2499,7 +2539,8 @@ async def process_mailing_confirmation(message: types.Message, state: FSMContext
         f"✅ <b>Успешно отправлено:</b> {success_count}\n"
         f"❌ <b>Не удалось отправить:</b> {failed_count}\n\n"
         f"<i>Рассылка сохранена в истории. Пользователи получили возможность оставить обратную связь.</i>",
-        reply_markup=get_admin_keyboard()
+        reply_markup=get_admin_keyboard(),
+        parse_mode=ParseMode.HTML
     )
     
     await state.clear()
@@ -2554,7 +2595,8 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
             # Уведомляем пользователя
             await callback.message.edit_text(
                 callback.message.text + "\n\n✅ <b>Вы отписаны от рассылок</b>",
-                reply_markup=None
+                reply_markup=None,
+                parse_mode=ParseMode.HTML
             )
             
             await callback.answer("Вы отписаны от рассылок")
@@ -2568,7 +2610,8 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
                         f"👤 Пользователь: @{username}\n"
                         f"🆔 ID: {user_id}\n"
                         f"📨 Рассылка ID: {mailing_id}\n"
-                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
+                        parse_mode=ParseMode.HTML
                     )
                 except Exception as e:
                     logger.error(f"Не удалось уведомить админа об отписке: {e}")
@@ -2583,7 +2626,8 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
             await callback.message.answer(
                 "💬 <b>Напишите ваш комментарий к рассылке:</b>\n\n"
                 "<i>Что понравилось или не понравилось? Что можно улучшить?</i>",
-                reply_markup=get_cancel_keyboard()
+                reply_markup=get_cancel_keyboard(),
+                parse_mode=ParseMode.HTML
             )
             
             await callback.answer()
@@ -2608,7 +2652,8 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
             feedback_icon = "👍" if feedback_type == "like" else "👎"
             await callback.message.edit_text(
                 callback.message.text + f"\n\n{feedback_icon} <b>Спасибо за ваш отзыв!</b>",
-                reply_markup=None
+                reply_markup=None,
+                parse_mode=ParseMode.HTML
             )
             
             await callback.answer(f"Спасибо за ваш отзыв: {feedback_text_map.get(feedback_type, '')}")
@@ -2625,7 +2670,8 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
                         f"🆔 ID: {user_id}\n"
                         f"📨 Рассылка ID: {mailing_id}\n"
                         f"💬 Отзыв: {feedback_type_text}\n"
-                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+                        f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
+                        parse_mode=ParseMode.HTML
                     )
                 except Exception as e:
                     logger.error(f"Не удалось уведомить админа об отзыве: {e}")
@@ -2639,7 +2685,7 @@ async def process_feedback_comment(message: types.Message, state: FSMContext):
     """Обработка комментария к рассылке"""
     if message.text == "❌ Отмена":
         await state.clear()
-        await message.answer("❌ Отправка комментария отменена.", reply_markup=get_main_keyboard())
+        await message.answer("❌ Отправка комментария отменена.", reply_markup=get_main_keyboard(), parse_mode=ParseMode.HTML)
         return
     
     data = await state.get_data()
@@ -2660,7 +2706,8 @@ async def process_feedback_comment(message: types.Message, state: FSMContext):
     await message.answer(
         "💬 <b>Спасибо за ваш комментарий!</b>\n\n"
         "Мы учтем ваше мнение для улучшения наших рассылок.",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.HTML
     )
     
     # Уведомляем администратора
@@ -2673,7 +2720,8 @@ async def process_feedback_comment(message: types.Message, state: FSMContext):
                 f"🆔 ID: {user_id}\n"
                 f"📨 Рассылка ID: {mailing_id}\n"
                 f"📝 Комментарий: {message.text[:500]}\n"
-                f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}"
+                f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
+                parse_mode=ParseMode.HTML
             )
         except Exception as e:
             logger.error(f"Не удалось уведомить админа о комментарии: {e}")
@@ -2685,7 +2733,7 @@ async def process_feedback_comment(message: types.Message, state: FSMContext):
 async def show_feedback(message: types.Message):
     """Показать обратную связь по рассылкам"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     conn = sqlite3.connect("tenders.db")
@@ -2709,7 +2757,7 @@ async def show_feedback(message: types.Message):
     conn.close()
     
     if not mailings:
-        await message.answer("📭 Нет рассылок с обратной связью")
+        await message.answer("📭 Нет рассылок с обратной связью", parse_mode=ParseMode.HTML)
         return
     
     keyboard = InlineKeyboardMarkup(inline_keyboard=[])
@@ -2734,7 +2782,8 @@ async def show_feedback(message: types.Message):
     await message.answer(
         "📋 <b>Обратная связь по рассылкам</b>\n\n"
         "Выберите рассылку для просмотра отзывов:",
-        reply_markup=keyboard
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
     )
 
 @dp.callback_query(F.data.startswith("view_feedback_"))
@@ -2784,7 +2833,7 @@ async def handle_view_feedback(callback: types.CallbackQuery):
     if len(feedback) > 10:
         response += f"\n\n... и еще {len(feedback) - 10} отзывов"
     
-    await callback.message.answer(response)
+    await callback.message.answer(response, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 @dp.callback_query(F.data == "feedback_stats")
@@ -2858,7 +2907,7 @@ async def handle_feedback_stats(callback: types.CallbackQuery):
         response += f"\n{i}. ID#{mailing['id']}: {mailing_text_preview}"
         response += f"\n   Отзывов: {mailing['feedback_count']}"
     
-    await callback.message.answer(response)
+    await callback.message.answer(response, parse_mode=ParseMode.HTML)
     await callback.answer()
 
 @dp.callback_query(F.data == "refresh_feedback")
@@ -2872,7 +2921,7 @@ async def handle_refresh_feedback(callback: types.CallbackQuery):
 async def show_manager_messages(message: types.Message):
     """Показать сообщения менеджеру"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     conn = sqlite3.connect("tenders.db")
@@ -2892,7 +2941,7 @@ async def show_manager_messages(message: types.Message):
     conn.close()
     
     if not messages:
-        await message.answer("📭 Новых сообщений менеджеру нет")
+        await message.answer("📭 Новых сообщений менеджеру нет", parse_mode=ParseMode.HTML)
         return
     
     response = f"📩 <b>Новые сообщения менеджеру ({len(messages)}):</b>\n\n"
@@ -2906,13 +2955,13 @@ async def show_manager_messages(message: types.Message):
         response += f"   📝 {msg['message_text'][:50]}...\n"
         response += f"   ⏰ {date_str}\n\n"
     
-    await message.answer(response)
+    await message.answer(response, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "⚙️ Настройки")
 async def show_settings(message: types.Message):
     """Показать настройки"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     stats = db.get_statistics(7)
@@ -2935,14 +2984,15 @@ async def show_settings(message: types.Message):
         "✅ Управление подписками\n"
         "✅ Просмотр обратной связи\n"
         "✅ Автоматические отчеты\n\n"
-        "<i>Для изменения настроек обратитесь к разработчику</i>"
+        "<i>Для изменения настроек обратитесь к разработчику</i>",
+        parse_mode=ParseMode.HTML
     )
 
 @dp.message(F.text == "👤 Режим пользователя")
 async def switch_to_user_mode(message: types.Message, state: FSMContext):
     """Переключение в режим пользователя"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
-        await message.answer("⛔ Доступ запрещен")
+        await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
     await state.clear()
@@ -2950,7 +3000,8 @@ async def switch_to_user_mode(message: types.Message, state: FSMContext):
         "👤 <b>Вы перешли в режим пользователя</b>\n\n"
         "Теперь вы можете тестировать функции бота как обычный пользователь.\n\n"
         "Чтобы вернуться в панель администратора, используйте команду /admin",
-        reply_markup=get_main_keyboard()
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.HTML
     )
 
 # =========== ЗАПОЛНЕНИЕ АНКЕТЫ ===========
@@ -2960,7 +3011,8 @@ async def process_name(message: types.Message, state: FSMContext):
     await state.update_data(full_name=message.text.strip())
     await message.answer(
         "✅ <b>ФИО сохранено</b>\n\n"
-        "Введите <b>полное название вашей компании</b>:"
+        "Введите <b>полное название вашей компании</b>:",
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_company)
 
@@ -2970,7 +3022,8 @@ async def process_company(message: types.Message, state: FSMContext):
     await state.update_data(company_name=message.text.strip())
     await message.answer(
         "✅ <b>Компания сохранена</b>\n\n"
-        "Введите ваш <b>телефон для связи</b> (в любом формате):"
+        "Введите ваш <b>телефон для связи</b> (в любом формате):",
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_phone)
 
@@ -2980,7 +3033,8 @@ async def process_phone(message: types.Message, state: FSMContext):
     await state.update_data(phone=message.text.strip())
     await message.answer(
         "✅ <b>Телефон сохранен</b>\n\n"
-        "Введите ваш <b>email для отправки тендеров</b>:"
+        "Введите ваш <b>email для отправки тендеров</b>:",
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_email)
 
@@ -2991,7 +3045,8 @@ async def process_email(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ <b>Email сохранен</b>\n\n"
         "Опишите <b>сферу деятельности</b> вашей компании:\n"
-        "<i>Пример: строительство, IT-услуги, поставка продуктов</i>"
+        "<i>Пример: строительство, IT-услуги, поставка продуктов</i>",
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_activity)
 
@@ -3002,7 +3057,8 @@ async def process_activity(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ <b>Сфера деятельности сохранена</b>\n\n"
         "Введите <b>регионы работы</b> (города, области):\n"
-        "<i>Пример: Москва, Московская область, Санкт-Петербург</i>"
+        "<i>Пример: Москва, Московская область, Санкт-Петербург</i>",
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_region)
 
@@ -3013,7 +3069,8 @@ async def process_region(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ <b>Регионы сохранены</b>\n\n"
         "Укажите <b>предпочтительный бюджет контрактов</b>:\n"
-        "<i>Пример: от 100 000 до 1 000 000 руб.</i>"
+        "<i>Пример: от 100 000 до 1 000 000 руб.</i>",
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_budget)
 
@@ -3024,7 +3081,8 @@ async def process_budget(message: types.Message, state: FSMContext):
     await message.answer(
         "✅ <b>Бюджет сохранен</b>\n\n"
         "Введите <b>ключевые слова для поиска</b> (через запятую):\n"
-        "<i>Пример: строительные работы, поставка оборудования, IT-аутсорсинг</i>"
+        "<i>Пример: строительные работы, поставка оборудования, IT-аутсорсинг</i>",
+        parse_mode=ParseMode.HTML
     )
     await state.set_state(Questionnaire.waiting_for_keywords)
 
@@ -3042,22 +3100,24 @@ async def process_keywords(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Используем FSInputFile для отправки файла
-                file = FSInputFile(anketa_path, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
-                
-                # Отправляем заполненную анкету пользователю
-                await bot.send_document(
-                    user_id,
-                    document=file,
-                    caption=(
-                        "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
-                        "✅ <b>Вы можете:</b>\n"
-                        "1. Сохранить этот файл на компьютере\n"
-                        "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
-                        "3. Или мы обработаем ее автоматически\n\n"
-                        "<i>Анкета также отправлена менеджеру для обработки.</i>"
+                # Используем InputFile для отправки файла
+                with open(anketa_path, 'rb') as f:
+                    file = InputFile(f, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
+                    
+                    # Отправляем заполненную анкету пользователю
+                    await bot.send_document(
+                        user_id,
+                        document=file,
+                        caption=(
+                            "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
+                            "✅ <b>Вы можете:</b>\n"
+                            "1. Сохранить этот файл на компьютере\n"
+                            "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
+                            "3. Или мы обработаем ее автоматически\n\n"
+                            "<i>Анкета также отправлена менеджеру для обработки.</i>"
+                        ),
+                        parse_mode=ParseMode.HTML
                     )
-                )
                 
                 # Сохраняем анкету в БД с путем к файлу
                 questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
@@ -3077,7 +3137,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                         f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
                         f"{time_info}\n\n"
                         f"<i>Заполненная анкета отправлена вам выше. Вы можете отправить ее менеджеру для ускорения обработки.</i>",
-                        reply_markup=get_main_keyboard()
+                        reply_markup=get_main_keyboard(),
+                        parse_mode=ParseMode.HTML
                     )
                     
                     # Отправляем анкету администратору
@@ -3095,7 +3156,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                     await message.answer(
                         "❌ <b>Ошибка при сохранении анкеты в базе данных</b>\n\n"
                         "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
-                        reply_markup=get_main_keyboard()
+                        reply_markup=get_main_keyboard(),
+                        parse_mode=ParseMode.HTML
                     )
                 
             except Exception as e:
@@ -3116,7 +3178,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                         f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
                         f"{time_info}\n\n"
                         f"<i>Приносим извинения, но нам не удалось отправить файл анкеты. Данные сохранены и отправлены менеджеру.</i>",
-                        reply_markup=get_main_keyboard()
+                        reply_markup=get_main_keyboard(),
+                        parse_mode=ParseMode.HTML
                     )
                     
                     await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
@@ -3138,7 +3201,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                     f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
                     f"{time_info}\n\n"
                     f"<i>Приносим извинения, но нам не удалось сформировать файл анкеты. Данные сохранены и отправлены менеджеру.</i>",
-                    reply_markup=get_main_keyboard()
+                    reply_markup=get_main_keyboard(),
+                    parse_mode=ParseMode.HTML
                 )
                 
                 await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
@@ -3147,7 +3211,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                 await message.answer(
                     "❌ <b>Ошибка при сохранении анкеты</b>\n\n"
                     "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
-                    reply_markup=get_main_keyboard()
+                    reply_markup=get_main_keyboard(),
+                    parse_mode=ParseMode.HTML
                 )
     
     except Exception as e:
@@ -3155,7 +3220,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
         await message.answer(
             "❌ <b>Произошла критическая ошибка при сохранении анкеты</b>\n\n"
             "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
         )
     
     await state.clear()
