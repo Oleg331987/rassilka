@@ -577,7 +577,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?)
+        VALUES (?, ?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -850,6 +850,67 @@ class Database:
         
         next_work_day = now + timedelta(days=days_to_add)
         return next_work_day.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
+
+    def get_new_questionnaires(self):
+        """Получение новых анкет (без выгрузки со статусом 'completed')"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT q.*, u.username 
+        FROM questionnaires q
+        LEFT JOIN users u ON q.user_id = u.user_id
+        WHERE q.id NOT IN (
+            SELECT questionnaire_id 
+            FROM tender_exports 
+            WHERE status = 'completed'
+        )
+        ORDER BY q.created_at DESC
+        LIMIT 20
+        ''')
+        
+        questionnaires = cursor.fetchall()
+        conn.close()
+        
+        return questionnaires
+    
+    def get_pending_exports_for_questionnaire(self, questionnaire_id: int):
+        """Получение ожидающих выгрузок для конкретной анкеты"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT * FROM tender_exports 
+        WHERE questionnaire_id = ? 
+        AND status != 'completed'
+        ORDER BY sent_at DESC
+        ''', (questionnaire_id,))
+        
+        exports = cursor.fetchall()
+        conn.close()
+        
+        return exports
+    
+    def create_tender_export_without_file(self, questionnaire_id: int, user_id: int):
+        """Создание записи о выгрузке без файла"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        sent_at = datetime.now() if self.is_working_hours() else self.get_next_working_time()
+        
+        cursor.execute('''
+        INSERT INTO tender_exports 
+        (questionnaire_id, user_id, sent_at, follow_up_scheduled)
+        VALUES (?, ?, ?, ?)
+        ''', (questionnaire_id, user_id, sent_at, 1))
+        
+        conn.commit()
+        export_id = cursor.lastrowid
+        conn.close()
+        
+        return export_id
 
 db = Database()
 
@@ -1626,21 +1687,7 @@ async def show_new_questionnaires(message: types.Message):
         await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
-    conn = sqlite3.connect("tenders.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-    SELECT q.*, u.username 
-    FROM questionnaires q
-    LEFT JOIN users u ON q.user_id = u.user_id
-    WHERE q.id NOT IN (SELECT questionnaire_id FROM tender_exports)
-    ORDER BY q.created_at DESC
-    LIMIT 10
-    ''')
-    
-    questionnaires = cursor.fetchall()
-    conn.close()
+    questionnaires = db.get_new_questionnaires()
     
     if not questionnaires:
         await message.answer("📭 Новых анкет нет", parse_mode=ParseMode.HTML)
@@ -1748,12 +1795,21 @@ async def process_export_file(message: types.Message, state: FSMContext):
         
         await bot.download_file(file_path, temp_path)
         
-        export_id = db.create_tender_export(
-            questionnaire_id, 
-            questionnaire['user_id'],
-            temp_path,
-            file_name
-        )
+        # Проверяем, есть ли уже выгрузка для этой анкеты
+        pending_exports = db.get_pending_exports_for_questionnaire(questionnaire_id)
+        
+        if pending_exports:
+            # Используем существующую выгрузку
+            export_id = pending_exports[0]['id']
+            db.save_export_file(export_id, temp_path, file_name)
+        else:
+            # Создаем новую выгрузку
+            export_id = db.create_tender_export(
+                questionnaire_id, 
+                questionnaire['user_id'],
+                temp_path,
+                file_name
+            )
         
         keyboard = get_export_confirmation_keyboard(export_id)
         
@@ -3017,7 +3073,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                 questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
                 
                 if questionnaire_id:
-                    export_id = db.create_tender_export(questionnaire_id, user_id)
+                    # Создаем запись о выгрузке БЕЗ файла
+                    export_id = db.create_tender_export_without_file(questionnaire_id, user_id)
                     
                     if db.is_working_hours():
                         time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
@@ -3055,7 +3112,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
                 questionnaire_id = db.save_questionnaire(user_id, user_data)
                 
                 if questionnaire_id:
-                    export_id = db.create_tender_export(questionnaire_id, user_id)
+                    # Создаем запись о выгрузке БЕЗ файла
+                    export_id = db.create_tender_export_without_file(questionnaire_id, user_id)
                     
                     if db.is_working_hours():
                         time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
@@ -3077,7 +3135,8 @@ async def process_keywords(message: types.Message, state: FSMContext):
             questionnaire_id = db.save_questionnaire(user_id, user_data)
             
             if questionnaire_id:
-                export_id = db.create_tender_export(questionnaire_id, user_id)
+                # Создаем запись о выгрузке БЕЗ файла
+                export_id = db.create_tender_export_without_file(questionnaire_id, user_id)
                 
                 if db.is_working_hours():
                     time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
