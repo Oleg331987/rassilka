@@ -582,8 +582,8 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?, ?)
-        ''', (mailing_id, user_id, telegram_message_id, datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+        VALUES (?, ?, ?)
+        ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
         message_id = cursor.lastrowid
@@ -1383,8 +1383,8 @@ async def cmd_my_exports(message: types.Message):
         await message.answer(
             "📭 <b>У вас пока нет выгрузок тендеров.</b>\n\n"
             "Хотите получить бесплатную подборку? Заполните анкету!\n\n"
-            "<i>После заполнения анкеты мы подготовим для вас подборку тендеров, "
-            "и она появится в этом разделе.</i>",
+            "<i>После заполнения анкеты мы подготовим для вас подборку тендеров, 
+            и она появится в этом разделе.</i>",
             reply_markup=get_main_keyboard(),
             parse_mode=ParseMode.HTML
         )
@@ -1448,7 +1448,7 @@ async def start_online_questionnaire(message: types.Message, state: FSMContext):
     
     await message.answer(
         "📝 <b>Заполнение анкеты онлайн</b>\n\n"
-        "<b>Порядок заполнения:</b>\n"
+        "<b>Порядок заполния:</b>\n"
         "1. Сфера деятельности компании\n"
         "2. Регионы работы\n"
         "3. Бюджет контрактов\n"
@@ -1987,7 +1987,7 @@ async def process_export_file(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("confirm_export_"))
 async def handle_confirm_export(callback: types.CallbackQuery):
-    """Подтверждение отправки выгрузки - ОСНОВНАЯ ИСПРАВЛЕННАЯ ФУНКЦИЯ"""
+    """Подтверждение отправки выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещен", show_alert=True)
         return
@@ -2010,7 +2010,7 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             return
         
         try:
-            # Если есть файл, отправляем его
+            # Если есть файл, отправляем его пользователю
             if file_path and os.path.exists(file_path):
                 # Используем простой способ отправки файла
                 with open(file_path, 'rb') as file:
@@ -2031,6 +2031,13 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                     )
                 
                 logger.info(f"✅ Файл выгрузки отправлен пользователю {user_id}: {file_path}")
+                
+                # Отправляем отдельное уведомление о новой выгрузке
+                await send_export_notification_to_user(user_id, export_id, {
+                    'company_name': export['company_name'],
+                    'activity': export.get('activity', 'Не указано')
+                })
+                
             else:
                 # Отправляем сообщение без файла
                 await bot.send_message(
@@ -2044,12 +2051,12 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                     parse_mode=ParseMode.HTML
                 )
                 logger.info(f"✅ Уведомление о выгрузке отправлено пользователю {user_id} (без файла)")
-            
-            # Отправляем отдельное уведомление о новой выгрузке
-            await send_export_notification_to_user(user_id, export_id, {
-                'company_name': export['company_name'],
-                'activity': export.get('activity', 'Не указано')
-            })
+                
+                # Отправляем отдельное уведомление о новой выгрузке
+                await send_export_notification_to_user(user_id, export_id, {
+                    'company_name': export['company_name'],
+                    'activity': export.get('activity', 'Не указано')
+                })
             
             # Отмечаем выгрузку как завершенную
             db.mark_export_completed(export_id, callback.from_user.first_name)
@@ -2083,10 +2090,32 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             
         except Exception as e:
             logger.error(f"❌ Ошибка отправки выгрузки пользователю {user_id}: {e}")
+            
+            # Пытаемся отправить хотя бы уведомление об ошибке админу
+            try:
+                await callback.message.answer(
+                    f"❌ <b>Ошибка при отправке выгрузки #{export_id}</b>\n\n"
+                    f"👤 Пользователь: {export['full_name']}\n"
+                    f"🆔 Telegram ID: {user_id}\n"
+                    f"Ошибка: {str(e)[:200]}\n\n"
+                    f"<i>Возможно, пользователь заблокировал бота или возникла техническая ошибка.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except:
+                pass
+            
             await callback.answer(f"❌ Ошибка отправки: {str(e)[:100]}", show_alert=True)
             
     except Exception as e:
         logger.error(f"❌ Общая ошибка в handle_confirm_export: {e}")
+        try:
+            await callback.message.answer(
+                f"❌ <b>Критическая ошибка при отправке выгрузки #{export_id}</b>\n\n"
+                f"Ошибка: {str(e)[:200]}",
+                parse_mode=ParseMode.HTML
+            )
+        except:
+            pass
         await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
 
 @dp.callback_query(F.data.startswith("cancel_export_"))
