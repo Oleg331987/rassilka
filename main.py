@@ -206,16 +206,15 @@ class Database:
         )
         ''')
         
-        # Выгрузки тендеров
+        # Выгрузки тендеров - УПРОЩЕННАЯ ВЕРСИЯ
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS tender_exports (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            questionnaire_id INTEGER,
             user_id INTEGER,
-            sent_at TIMESTAMP,
-            sent_by TEXT DEFAULT 'bot',
             file_path TEXT,
             file_name TEXT,
+            sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            sent_by TEXT DEFAULT 'bot',
             status TEXT DEFAULT 'pending',
             admin_notified BOOLEAN DEFAULT 0,
             follow_up_sent BOOLEAN DEFAULT 0,
@@ -342,18 +341,16 @@ class Database:
         
         return last_id
     
-    def create_tender_export(self, questionnaire_id: int, user_id: int, file_path: str = None, file_name: str = None):
-        """Создание записи о выгрузке тендеров"""
+    def create_tender_export(self, user_id: int, file_path: str = None, file_name: str = None):
+        """Создание записи о выгрузке тендеров - УПРОЩЕННАЯ ВЕРСИЯ"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
-        sent_at = datetime.now() if self.is_working_hours() else self.get_next_working_time()
-        
         cursor.execute('''
         INSERT INTO tender_exports 
-        (questionnaire_id, user_id, sent_at, file_path, file_name, follow_up_scheduled)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ''', (questionnaire_id, user_id, sent_at, file_path, file_name, 1))
+        (user_id, file_path, file_name, follow_up_scheduled)
+        VALUES (?, ?, ?, ?)
+        ''', (user_id, file_path, file_name, 1))
         
         conn.commit()
         export_id = cursor.lastrowid
@@ -398,9 +395,8 @@ class Database:
         one_hour_ago = (datetime.now() - timedelta(hours=1)).strftime('%Y-%m-%d %H:%M:%S')
         
         cursor.execute('''
-        SELECT te.*, q.full_name, q.company_name, u.user_id, u.username
+        SELECT te.*, u.username, u.first_name, u.last_name
         FROM tender_exports te
-        JOIN questionnaires q ON te.questionnaire_id = q.id
         JOIN users u ON te.user_id = u.user_id
         WHERE te.status = 'completed' 
         AND te.follow_up_scheduled = 1
@@ -715,9 +711,9 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-        SELECT te.*, q.full_name, q.company_name, q.email, q.phone
+        SELECT te.*, u.username, u.first_name, u.last_name, u.email, u.phone
         FROM tender_exports te
-        JOIN questionnaires q ON te.questionnaire_id = q.id
+        JOIN users u ON te.user_id = u.user_id
         WHERE te.status = 'pending'
         ORDER BY te.sent_at DESC
         LIMIT 10
@@ -728,23 +724,21 @@ class Database:
         
         return exports
     
-    def get_questionnaire_by_id(self, questionnaire_id: int):
-        """Получение анкеты по ID"""
+    def get_user_by_id(self, user_id: int):
+        """Получение пользователя по ID"""
         conn = sqlite3.connect(self.db_name)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
         cursor.execute('''
-        SELECT q.*, u.username, u.user_id
-        FROM questionnaires q
-        JOIN users u ON q.user_id = u.user_id
-        WHERE q.id = ?
-        ''', (questionnaire_id,))
+        SELECT * FROM users 
+        WHERE user_id = ?
+        ''', (user_id,))
         
-        questionnaire = cursor.fetchone()
+        user = cursor.fetchone()
         conn.close()
         
-        return questionnaire
+        return user
     
     def get_export_by_id(self, export_id: int):
         """Получение выгрузки по ID"""
@@ -753,9 +747,8 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-        SELECT te.*, q.full_name, q.company_name, q.email, u.username, u.user_id
+        SELECT te.*, u.username, u.first_name, u.last_name, u.email, u.phone
         FROM tender_exports te
-        JOIN questionnaires q ON te.questionnaire_id = q.id
         JOIN users u ON te.user_id = u.user_id
         WHERE te.id = ?
         ''', (export_id,))
@@ -772,9 +765,8 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-        SELECT te.*, q.company_name, q.activity
+        SELECT te.*
         FROM tender_exports te
-        JOIN questionnaires q ON te.questionnaire_id = q.id
         WHERE te.user_id = ?
         ORDER BY te.sent_at DESC
         LIMIT 20
@@ -886,11 +878,6 @@ class Database:
         SELECT q.*, u.username 
         FROM questionnaires q
         LEFT JOIN users u ON q.user_id = u.user_id
-        WHERE q.id NOT IN (
-            SELECT questionnaire_id 
-            FROM tender_exports 
-            WHERE status = 'completed'
-        )
         ORDER BY q.created_at DESC
         LIMIT 20
         ''')
@@ -918,18 +905,16 @@ class Database:
         
         return exports
     
-    def create_tender_export_without_file(self, questionnaire_id: int, user_id: int):
+    def create_tender_export_without_file(self, user_id: int):
         """Создание записи о выгрузке без файла"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
-        sent_at = datetime.now() if self.is_working_hours() else self.get_next_working_time()
-        
         cursor.execute('''
         INSERT INTO tender_exports 
-        (questionnaire_id, user_id, sent_at, follow_up_scheduled, status)
-        VALUES (?, ?, ?, ?, 'pending')
-        ''', (questionnaire_id, user_id, sent_at, 1))
+        (user_id, follow_up_scheduled, status)
+        VALUES (?, ?, 'pending')
+        ''', (user_id, 1))
         
         conn.commit()
         export_id = cursor.lastrowid
@@ -1093,12 +1078,10 @@ def get_export_confirmation_keyboard(export_id: int):
         ]
     )
 
-def get_export_selection_keyboard():
-    """Клавиатура выбора типа отправки выгрузки"""
+def get_export_user_input_keyboard():
+    """Клавиатура для ввода ID пользователя"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📤 Отправить файл выгрузки")],
-            [KeyboardButton(text="📝 Создать выгрузку без файла")],
             [KeyboardButton(text="❌ Отмена")]
         ],
         resize_keyboard=True
@@ -1138,8 +1121,7 @@ class FeedbackComment(StatesGroup):
     waiting_for_comment = State()
 
 class SendExport(StatesGroup):
-    waiting_for_questionnaire_id = State()
-    waiting_for_export_type = State()
+    waiting_for_user_id = State()
     waiting_for_export_file = State()
 
 # =========== ФУНКЦИЯ ОТПРАВКИ АНКЕТЫ АДМИНИСТРАТОРУ ===========
@@ -1250,10 +1232,21 @@ async def send_anketa_file(message: types.Message, file_path: str):
         return True  # Возвращаем True, так как пользователь получил ссылку
 
 # =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ УВЕДОМЛЕНИЯ О НОВОЙ ВЫГРУЗКЕ ===========
-async def send_export_notification_to_user(user_id: int, export_id: int, export_data: dict):
+async def send_export_notification_to_user(user_id: int, export_id: int, export_data: dict = None):
     """Отправка уведомления пользователю о новой выгрузке"""
     try:
         notification_message = f"""
+📨 <b>НОВАЯ ВЫГРУЗКА ТЕНДЕРОВ #{export_id}</b>
+
+📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+<b>Выгрузка успешно подготовлена и отправлена!</b>
+
+<i>Вы можете посмотреть все ваши выгрузки в разделе "📊 Мои выгрузки" или нажав кнопку ниже.</i>
+"""
+        
+        if export_data:
+            notification_message = f"""
 📨 <b>НОВАЯ ВЫГРУЗКА ТЕНДЕРОВ #{export_id}</b>
 
 🏢 <b>Компания:</b> {export_data.get('company_name', 'Ваша компания')}
@@ -1342,7 +1335,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
     else:
         await message.answer(
             "👋 <b>Привет! Я интеллектуальный ассистент компании Тритика.</b>\n\n"
-            "Помогаю организациям находить выгодные тендеры. "
+            "Помогаю организацим находить выгодные тендеры. "
             "Хотите бесплатно получить подборку тендеров по вашей сфере? "
             "Вам надо лишь заполнить короткую анкету.",
             reply_markup=get_main_keyboard(),
@@ -1408,9 +1401,8 @@ async def cmd_my_exports(message: types.Message):
         elif export['status'] == 'completed':
             file_info = "📝 Выгрузка отправлена (без файла)"
         
-        response += f"<b>{i}. #{export['id']} - {export['company_name']}</b>\n"
+        response += f"<b>{i}. #{export['id']}</b>\n"
         response += f"   📅 <i>Дата запроса:</i> {date_str}\n"
-        response += f"   🎯 <i>Сфера:</i> {export['activity'][:40]}...\n"
         response += f"   📊 <i>Статус:</i> {status_icon} {status_text}\n"
         
         if file_info:
@@ -1448,7 +1440,7 @@ async def start_online_questionnaire(message: types.Message, state: FSMContext):
     
     await message.answer(
         "📝 <b>Заполнение анкеты онлайн</b>\n\n"
-        "<b>Порядок заполния:</b>\n"
+        "<b>Порядок заполнения:</b>\n"
         "1. Сфера деятельности компании\n"
         "2. Регионы работы\n"
         "3. Бюджет контрактов\n"
@@ -1559,8 +1551,7 @@ async def cancel_action(message: types.Message, state: FSMContext):
                          ManualMailing.waiting_for_filter,
                          ManualMailing.waiting_for_confirmation,
                          FeedbackComment.waiting_for_comment,
-                         SendExport.waiting_for_questionnaire_id,
-                         SendExport.waiting_for_export_type,
+                         SendExport.waiting_for_user_id,
                          SendExport.waiting_for_export_file]:
         await state.clear()
         is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
@@ -1796,10 +1787,10 @@ async def show_new_questionnaires(message: types.Message):
     questionnaires = db.get_new_questionnaires()
     
     if not questionnaires:
-        await message.answer("📭 Новых анкет нет", parse_mode=ParseMode.HTML)
+        await message.answer("📭 Анкет нет", parse_mode=ParseMode.HTML)
         return
     
-    response = f"🆕 <b>Новые анкеты ({len(questionnaires)}):</b>\n\n"
+    response = f"📋 <b>Все анкеты ({len(questionnaires)}):</b>\n\n"
     
     for i, q in enumerate(questionnaires, 1):
         date_str = q['created_at'][:16] if q['created_at'] else "??.?? ??:??"
@@ -1814,106 +1805,70 @@ async def show_new_questionnaires(message: types.Message):
 
 @dp.message(F.text == "📤 Отправить выгрузку")
 async def start_send_export(message: types.Message, state: FSMContext):
-    """Начало отправки выгрузки пользователю"""
+    """Начало отправки выгрузки пользователю - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
-    await state.set_state(SendExport.waiting_for_questionnaire_id)
+    await state.set_state(SendExport.waiting_for_user_id)
     await message.answer(
         "📤 <b>Отправка выгрузки пользователю</b>\n\n"
-        "Введите ID анкеты для которой нужно отправить выгрузку:\n"
-        "<i>(ID можно взять из списка новых анкет)</i>",
-        reply_markup=get_cancel_keyboard(),
+        "Введите Telegram ID пользователя (число):\n"
+        "<i>ID можно получить из списка пользователей или из сообщений</i>",
+        reply_markup=get_export_user_input_keyboard(),
         parse_mode=ParseMode.HTML
     )
 
-@dp.message(SendExport.waiting_for_questionnaire_id)
-async def process_export_questionnaire_id(message: types.Message, state: FSMContext):
-    """Обработка ID анкеты для отправки выгрузки"""
+@dp.message(SendExport.waiting_for_user_id)
+async def process_export_user_id(message: types.Message, state: FSMContext):
+    """Обработка ID пользователя для отправки выгрузки"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
     if not message.text.isdigit():
-        await message.answer("❌ Пожалуйста, введите числовой ID анкеты", parse_mode=ParseMode.HTML)
+        await message.answer("❌ Пожалуйста, введите числовой Telegram ID пользователя", parse_mode=ParseMode.HTML)
         return
     
-    questionnaire_id = int(message.text)
+    user_id = int(message.text)
     
-    questionnaire = db.get_questionnaire_by_id(questionnaire_id)
+    # Проверяем существование пользователя в базе
+    user = db.get_user_by_id(user_id)
     
-    if not questionnaire:
-        await message.answer("❌ Анкета с таким ID не найдена", parse_mode=ParseMode.HTML)
-        return
+    if not user:
+        # Если пользователя нет в базе, добавляем его
+        try:
+            # Пробуем получить информацию о пользователе через Telegram API
+            chat = await bot.get_chat(user_id)
+            db.add_user(user_id, chat.username or "", chat.first_name or "", chat.last_name or "")
+            user = db.get_user_by_id(user_id)
+            
+            if not user:
+                await message.answer(f"❌ Не удалось добавить пользователя {user_id} в базу данных", parse_mode=ParseMode.HTML)
+                return
+        except Exception as e:
+            # Если не удалось получить информацию, все равно добавляем с минимальными данными
+            db.add_user(user_id, "", f"Пользователь_{user_id}", "")
+            user = db.get_user_by_id(user_id)
     
-    await state.update_data(questionnaire_id=questionnaire_id)
-    await state.set_state(SendExport.waiting_for_export_type)
+    await state.update_data(user_id=user_id)
+    await state.set_state(SendExport.waiting_for_export_file)
+    
+    user_name = f"{user['first_name']} {user['last_name'] or ''}".strip()
+    username = f"@{user['username']}" if user['username'] else "без username"
     
     await message.answer(
-        f"✅ <b>Анкета #{questionnaire_id} найдена</b>\n\n"
-        f"👤 <b>Пользователь:</b> {questionnaire['full_name']}\n"
-        f"🏢 <b>Компания:</b> {questionnaire['company_name']}\n"
-        f"📧 <b>Email:</b> {questionnaire['email']}\n"
-        f"🆔 <b>Telegram ID:</b> {questionnaire['user_id']}\n\n"
-        f"Выберите тип отправки выгрузки:",
-        reply_markup=get_export_selection_keyboard(),
+        f"✅ <b>Пользователь найден/добавлен</b>\n\n"
+        f"👤 <b>Пользователь:</b> {user_name}\n"
+        f"📱 <b>Username:</b> {username}\n"
+        f"🆔 <b>Telegram ID:</b> {user_id}\n\n"
+        f"📤 <b>Отправьте файл с выгрузкой тендеров:</b>\n\n"
+        f"<i>Поддерживаются файлы: PDF, Excel, Word, ZIP, RAR, TXT</i>\n"
+        f"<i>Или отправьте текст для создания выгрузки без файла</i>",
+        reply_markup=get_cancel_keyboard(),
         parse_mode=ParseMode.HTML
     )
-
-@dp.message(SendExport.waiting_for_export_type)
-async def process_export_type(message: types.Message, state: FSMContext):
-    """Обработка типа отправки выгрузки"""
-    if message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
-        return
-    
-    if message.text == "📤 Отправить файл выгрузки":
-        await state.set_state(SendExport.waiting_for_export_file)
-        
-        await message.answer(
-            "📤 <b>Отправьте файл с выгрузкой тендеров:</b>\n\n"
-            "<i>Поддерживаются файлы: PDF, Excel, Word, ZIP, RAR, TXT</i>",
-            reply_markup=get_cancel_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-    elif message.text == "📝 Создать выгрузку без файла":
-        data = await state.get_data()
-        questionnaire_id = data.get('questionnaire_id')
-        
-        if not questionnaire_id:
-            await message.answer("❌ Ошибка: ID анкеты не найден", parse_mode=ParseMode.HTML)
-            await state.clear()
-            return
-        
-        questionnaire = db.get_questionnaire_by_id(questionnaire_id)
-        if not questionnaire:
-            await message.answer("❌ Анкета не найдена", parse_mode=ParseMode.HTML)
-            await state.clear()
-            return
-        
-        # Создаем выгрузку без файла
-        export_id = db.create_tender_export_without_file(questionnaire_id, questionnaire['user_id'])
-        
-        keyboard = get_export_confirmation_keyboard(export_id)
-        
-        await message.answer(
-            f"📤 <b>Подтверждение отправки выгрузки (без файла)</b>\n\n"
-            f"👤 <b>Пользователь:</b> {questionnaire['full_name']}\n"
-            f"🏢 <b>Компания:</b> {questionnaire['company_name']}\n"
-            f"📧 <b>Email:</b> {questionnaire['email']}\n"
-            f"🆔 <b>Telegram ID:</b> {questionnaire['user_id']}\n"
-            f"🆔 <b>ID выгрузки:</b> {export_id}\n\n"
-            f"<i>Выгрузка будет отправлена без файла. Пользователь получит уведомление о готовности выгрузки.</i>",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.HTML
-        )
-        
-        await state.clear()
-    else:
-        await message.answer("❌ Пожалуйста, выберите тип отправки из предложенных кнопок.", parse_mode=ParseMode.HTML)
 
 @dp.message(SendExport.waiting_for_export_file)
 async def process_export_file(message: types.Message, state: FSMContext):
@@ -1923,65 +1878,107 @@ async def process_export_file(message: types.Message, state: FSMContext):
         await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
         return
     
-    if not message.document:
-        await message.answer("❌ Пожалуйста, отправьте файл с выгрузкой", parse_mode=ParseMode.HTML)
-        return
-    
     data = await state.get_data()
-    questionnaire_id = data.get('questionnaire_id')
+    user_id = data.get('user_id')
     
-    if not questionnaire_id:
-        await message.answer("❌ Ошибка: ID анкеты не найден", parse_mode=ParseMode.HTML)
+    if not user_id:
+        await message.answer("❌ Ошибка: ID пользователя не найден", parse_mode=ParseMode.HTML)
         await state.clear()
         return
     
-    questionnaire = db.get_questionnaire_by_id(questionnaire_id)
-    if not questionnaire:
-        await message.answer("❌ Анкета не найдена", parse_mode=ParseMode.HTML)
+    user = db.get_user_by_id(user_id)
+    if not user:
+        await message.answer("❌ Пользователь не найден", parse_mode=ParseMode.HTML)
         await state.clear()
         return
     
-    file_id = message.document.file_id
-    file_name = message.document.file_name
+    file_id = None
+    file_name = None
+    file_path = None
+    text_export = None
     
-    try:
-        file = await bot.get_file(file_id)
-        file_path = file.file_path
+    # Если пользователь отправил документ
+    if message.document:
+        file_id = message.document.file_id
+        file_name = message.document.file_name
         
-        # Создаем уникальное имя файла для экспорта
-        timestamp = int(datetime.now().timestamp())
-        export_filename = f"export_{questionnaire_id}_{timestamp}_{file_name}"
-        export_path = os.path.join(EXPORTS_DIR, export_filename)
+        try:
+            file = await bot.get_file(file_id)
+            file_path = file.file_path
+            
+            # Создаем уникальное имя файла для экспорта
+            timestamp = int(datetime.now().timestamp())
+            export_filename = f"export_{user_id}_{timestamp}_{file_name}"
+            export_path = os.path.join(EXPORTS_DIR, export_filename)
+            
+            # Скачиваем файл в папку exports
+            await bot.download_file(file_path, export_path)
+            
+            # Создаем запись о выгрузке
+            export_id = db.create_tender_export(
+                user_id,
+                export_path,
+                file_name
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка обработки файла выгрузки: {e}")
+            await message.answer(f"❌ Ошибка обработки файла: {e}", parse_mode=ParseMode.HTML)
+            await state.clear()
+            return
+    
+    # Если пользователь отправил текст
+    elif message.text:
+        text_export = message.text
         
-        # Скачиваем файл в папку exports
-        await bot.download_file(file_path, export_path)
-        
-        # Создаем запись о выгрузке
-        export_id = db.create_tender_export(
-            questionnaire_id, 
-            questionnaire['user_id'],
-            export_path,
-            file_name
-        )
-        
-        keyboard = get_export_confirmation_keyboard(export_id)
-        
-        await message.answer(
-            f"📤 <b>Подтверждение отправки выгрузки</b>\n\n"
-            f"📄 <b>Файл:</b> {file_name}\n"
-            f"👤 <b>Пользователь:</b> {questionnaire['full_name']}\n"
-            f"🏢 <b>Компания:</b> {questionnaire['company_name']}\n"
-            f"📧 <b>Email:</b> {questionnaire['email']}\n"
-            f"🆔 <b>Telegram ID:</b> {questionnaire['user_id']}\n"
-            f"🆔 <b>ID выгрузки:</b> {export_id}\n\n"
-            f"<i>Подтвердите отправку выгрузки пользователю.</i>",
-            reply_markup=keyboard,
-            parse_mode=ParseMode.HTML
-        )
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка обработки файла выгрузки: {e}")
-        await message.answer(f"❌ Ошибка обработки файла: {e}", parse_mode=ParseMode.HTML)
+        # Создаем текстовый файл с выгрузкой
+        try:
+            timestamp = int(datetime.now().timestamp())
+            export_filename = f"export_{user_id}_{timestamp}_text.txt"
+            export_path = os.path.join(EXPORTS_DIR, export_filename)
+            
+            with open(export_path, 'w', encoding='utf-8') as f:
+                f.write(text_export)
+            
+            # Создаем запись о выгрузке
+            export_id = db.create_tender_export(
+                user_id,
+                export_path,
+                "Выгрузка_тендеров.txt"
+            )
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка создания текстовой выгрузки: {e}")
+            # Создаем выгрузку без файла
+            export_id = db.create_tender_export_without_file(user_id)
+    
+    else:
+        await message.answer("❌ Пожалуйста, отправьте файл или текст с выгрузкой", parse_mode=ParseMode.HTML)
+        return
+    
+    keyboard = get_export_confirmation_keyboard(export_id)
+    
+    user_name = f"{user['first_name']} {user['last_name'] or ''}".strip()
+    username = f"@{user['username']}" if user['username'] else "без username"
+    
+    if file_name:
+        file_info = f"📄 <b>Файл:</b> {file_name}"
+    elif text_export:
+        file_info = f"📝 <b>Текстовая выгрузка:</b> {len(text_export)} символов"
+    else:
+        file_info = "📝 <b>Выгрузка без файла</b>"
+    
+    await message.answer(
+        f"📤 <b>Подтверждение отправки выгрузки</b>\n\n"
+        f"{file_info}\n"
+        f"👤 <b>Пользователь:</b> {user_name}\n"
+        f"📱 <b>Username:</b> {username}\n"
+        f"🆔 <b>Telegram ID:</b> {user_id}\n"
+        f"🆔 <b>ID выгрузки:</b> {export_id}\n\n"
+        f"<i>Подтвердите отправку выгрузки пользователю.</i>",
+        reply_markup=keyboard,
+        parse_mode=ParseMode.HTML
+    )
     
     await state.clear()
 
@@ -2009,6 +2006,11 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             await callback.answer("❌ ID пользователя не найден", show_alert=True)
             return
         
+        user = db.get_user_by_id(user_id)
+        if not user:
+            await callback.answer("❌ Пользователь не найден", show_alert=True)
+            return
+        
         try:
             # Если есть файл, отправляем его пользователю
             if file_path and os.path.exists(file_path):
@@ -2021,8 +2023,6 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                         document=input_file,
                         caption=(
                             f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                            f"🏢 <b>Компания:</b> {export['company_name']}\n"
-                            f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
                             f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
                             f"<i>Выгрузка успешно подготовлена и отправлена. "
                             f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'</i>"
@@ -2032,19 +2032,14 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 
                 logger.info(f"✅ Файл выгрузки отправлен пользователю {user_id}: {file_path}")
                 
-                # Отправляем отдельное уведомление о новой выгрузке
-                await send_export_notification_to_user(user_id, export_id, {
-                    'company_name': export['company_name'],
-                    'activity': export.get('activity', 'Не указано')
-                })
+                # Отправляем уведомление о новой выгрузке
+                await send_export_notification_to_user(user_id, export_id)
                 
             else:
                 # Отправляем сообщение без файла
                 await bot.send_message(
                     user_id,
                     f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                    f"🏢 <b>Компания:</b> {export['company_name']}\n"
-                    f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
                     f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
                     f"<i>Выгрузка была успешно подготовлена. "
                     f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'.</i>",
@@ -2052,11 +2047,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 )
                 logger.info(f"✅ Уведомление о выгрузке отправлено пользователю {user_id} (без файла)")
                 
-                # Отправляем отдельное уведомление о новой выгрузке
-                await send_export_notification_to_user(user_id, export_id, {
-                    'company_name': export['company_name'],
-                    'activity': export.get('activity', 'Не указано')
-                })
+                # Отправляем уведомление о новой выгрузке
+                await send_export_notification_to_user(user_id, export_id)
             
             # Отмечаем выгрузку как завершенную
             db.mark_export_completed(export_id, callback.from_user.first_name)
@@ -2075,10 +2067,12 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 parse_mode=ParseMode.HTML
             )
             
+            user_name = f"{export['first_name']} {export['last_name'] or ''}".strip()
+            
             await callback.message.answer(
                 f"✅ <b>Выгрузка #{export_id} успешно отправлена пользователю</b>\n\n"
-                f"👤 Пользователь: {export['full_name']}\n"
-                f"🏢 Компания: {export['company_name']}\n"
+                f"👤 Пользователь: {user_name}\n"
+                f"📱 Username: @{export['username'] or 'без username'}\n"
                 f"🆔 Telegram ID: {user_id}\n"
                 f"{'📄 Файл: ' + file_name if file_name else '📝 Без файла'}\n\n"
                 f"<i>Пользователь получил уведомление о новой выгрузке. "
@@ -2095,7 +2089,7 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             try:
                 await callback.message.answer(
                     f"❌ <b>Ошибка при отправке выгрузки #{export_id}</b>\n\n"
-                    f"👤 Пользователь: {export['full_name']}\n"
+                    f"👤 Пользователь: {export['first_name']} {export['last_name'] or ''}\n"
                     f"🆔 Telegram ID: {user_id}\n"
                     f"Ошибка: {str(e)[:200]}\n\n"
                     f"<i>Возможно, пользователь заблокировал бота или возникла техническая ошибка.</i>",
@@ -2226,7 +2220,6 @@ async def handle_follow_up_response(callback: types.CallbackQuery):
                         f"📨 <b>ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА FOLLOW-UP</b>\n\n"
                         f"👤 Пользователь: @{username}\n"
                         f"🆔 ID: {user_id}\n"
-                        f"🏢 Компания: {export['company_name']}\n"
                         f"💬 Ответ: {response_text}\n"
                         f"📅 Время: {datetime.now().strftime('%H:%M %d.%m.%Y')}",
                         parse_mode=ParseMode.HTML
@@ -2387,7 +2380,7 @@ async def handle_user_stats(callback: types.CallbackQuery):
            COUNT(DISTINCT mf.id) as feedback_count
     FROM users u
     LEFT JOIN questionnaires q ON u.user_id = q.user_id
-    LEFT JOIN tender_exports te ON q.id = te.questionnaire_id
+    LEFT JOIN tender_exports te ON u.user_id = te.user_id
     LEFT JOIN manager_messages mm ON u.user_id = mm.user_id
     LEFT JOIN mailing_feedback mf ON u.user_id = mf.user_id
     WHERE u.user_id = ?
@@ -3349,7 +3342,7 @@ async def process_email(message: types.Message, state: FSMContext):
                 
                 if questionnaire_id:
                     # Создаем запись о выгрузке БЕЗ файла
-                    export_id = db.create_tender_export_without_file(questionnaire_id, user_id)
+                    export_id = db.create_tender_export_without_file(user_id)
                     
                     if db.is_working_hours():
                         time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
@@ -3388,7 +3381,7 @@ async def process_email(message: types.Message, state: FSMContext):
                 
                 if questionnaire_id:
                     # Создаем запись о выгрузке БЕЗ файла
-                    export_id = db.create_tender_export_without_file(questionnaire_id, user_id)
+                    export_id = db.create_tender_export_without_file(user_id)
                     
                     if db.is_working_hours():
                         time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
@@ -3411,7 +3404,7 @@ async def process_email(message: types.Message, state: FSMContext):
             
             if questionnaire_id:
                 # Создаем запись о выгрузке БЕЗ файла
-                export_id = db.create_tender_export_without_file(questionnaire_id, user_id)
+                export_id = db.create_tender_export_without_file(user_id)
                 
                 if db.is_working_hours():
                     time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
