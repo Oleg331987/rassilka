@@ -23,7 +23,8 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove, BufferedInputFile, InputFile, FSInputFile
+    ReplyKeyboardRemove, BufferedInputFile, InputFile, FSInputFile,
+    Contact
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -35,8 +36,8 @@ import aiohttp
 from aiohttp import web
 
 # =========== НАСТРОЙКИ ===========
-BOT_TOKEN = os.getenv("BOT_TOKEN", "8120629620:AAH2ZjoCPEoE39KRIrf8x9JYhOpScphnKgo")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "6003624437")) if os.getenv("ADMIN_ID") else None
+BOT_TOKEN = os.getenv("BOT_TOKEN", "")
+ADMIN_ID = int(os.getenv("ADMIN_ID", "0")) if os.getenv("ADMIN_ID") else None
 PORT = int(os.getenv("PORT", 8080))
 
 # Настройки времени работы (пн-чт 8:30-17:30 пт 8:30-16:30)
@@ -91,16 +92,16 @@ def create_filled_anketa(user_data: dict) -> Optional[str]:
         # Информация о компании
         doc.add_heading('Информация о компании', level=1)
         
-        # Заполняем поля
+        # Заполняем поля (новый порядок)
         fields = [
-            ('1. ФИО полностью:', user_data.get('full_name', 'Не указано')),
-            ('2. Название компании:', user_data.get('company_name', 'Не указано')),
-            ('3. Телефон для связи:', user_data.get('phone', 'Не указано')),
-            ('4. Email для отправки тендеров:', user_data.get('email', 'Не указано')),
-            ('5. Сфера деятельности компании:', user_data.get('activity', 'Не указано')),
-            ('6. Регионы работы (города, области):', user_data.get('region', 'Не указано')),
-            ('7. Предпочтительный бюджет контрактов:', user_data.get('budget', 'Не указано')),
-            ('8. Ключевые слова для поиска (через запятую):', user_data.get('keywords', 'Не указано')),
+            ('1. Сфера деятельности компании:', user_data.get('activity', 'Не указано')),
+            ('2. Регионы работы (города, области):', user_data.get('region', 'Не указано')),
+            ('3. Предпочтительный бюджет контрактов:', user_data.get('budget', 'Не указано')),
+            ('4. Ключевые слова для поиска (через запятую):', user_data.get('keywords', 'Не указано')),
+            ('5. Название компании:', user_data.get('company_name', 'Не указано')),
+            ('6. ФИО полностью:', user_data.get('full_name', 'Не указано')),
+            ('7. Телефон для связи:', user_data.get('phone', 'Не указано')),
+            ('8. Email для отправки тендеров:', user_data.get('email', 'Не указано')),
         ]
         
         for label, value in fields:
@@ -295,7 +296,7 @@ class Database:
         return True
     
     def save_questionnaire(self, user_id: int, data: dict, anketa_path: str = None):
-        """Сохранение анкеты"""
+        """Сохранение анкеты (новый порядок полей)"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
@@ -577,7 +578,7 @@ class Database:
         
         cursor.execute('''
         INSERT INTO sent_messages (mailing_id, user_id, telegram_message_id)
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?)
         ''', (mailing_id, user_id, telegram_message_id))
         
         conn.commit()
@@ -748,7 +749,7 @@ class Database:
         cursor = conn.cursor()
         
         cursor.execute('''
-        SELECT te.*, q.full_name, q.company_name, q.email, u.username
+        SELECT te.*, q.full_name, q.company_name, q.email, u.username, u.user_id
         FROM tender_exports te
         JOIN questionnaires q ON te.questionnaire_id = q.id
         JOIN users u ON te.user_id = u.user_id
@@ -953,6 +954,17 @@ def get_main_keyboard():
         input_field_placeholder="Выберите действие..."
     )
 
+def get_phone_keyboard():
+    """Клавиатура для ввода телефона с кнопкой поделиться"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Поделиться телефоном", request_contact=True)],
+            [KeyboardButton(text="📝 Ввести вручную")],
+            [KeyboardButton(text="❌ Отмена")]
+        ],
+        resize_keyboard=True
+    )
+
 def get_admin_keyboard():
     """Клавиатура администратора"""
     return ReplyKeyboardMarkup(
@@ -1059,14 +1071,15 @@ def get_export_confirmation_keyboard(export_id: int):
 
 # =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
-    waiting_for_name = State()
-    waiting_for_company = State()
-    waiting_for_phone = State()
-    waiting_for_email = State()
+    # НОВЫЙ ПОРЯДОК: сначала бизнес-информация, потом контакты
     waiting_for_activity = State()
     waiting_for_region = State()
     waiting_for_budget = State()
     waiting_for_keywords = State()
+    waiting_for_company = State()
+    waiting_for_name = State()
+    waiting_for_phone = State()
+    waiting_for_email = State()
 
 class ManagerDialog(StatesGroup):
     waiting_for_message = State()
@@ -1100,29 +1113,29 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
 
 <b>Данные анкеты:</b>
 
-<b>1. ФИО полностью:</b>
-{user_data.get('full_name', 'Не указано')}
-
-<b>2. Название компании:</b>
-{user_data.get('company_name', 'Не указано')}
-
-<b>3. Телефон для связи:</b>
-{user_data.get('phone', 'Не указано')}
-
-<b>4. Email для отправки тендеров:</b>
-{user_data.get('email', 'Не указано')}
-
-<b>5. Сфера деятельности компании:</b>
+<b>1. Сфера деятельности компании:</b>
 {user_data.get('activity', 'Не указано')}
 
-<b>6. Регионы работы:</b>
+<b>2. Регионы работы:</b>
 {user_data.get('region', 'Не указано')}
 
-<b>7. Бюджет контрактов:</b>
+<b>3. Бюджет контрактов:</b>
 {user_data.get('budget', 'Не указано')}
 
-<b>8. Ключевые слова для поиска:</b>
+<b>4. Ключевые слова для поиска:</b>
 {user_data.get('keywords', 'Не указано')}
+
+<b>5. Название компании:</b>
+{user_data.get('company_name', 'Не указано')}
+
+<b>6. ФИО полностью:</b>
+{user_data.get('full_name', 'Не указано')}
+
+<b>7. Телефон для связи:</b>
+{user_data.get('phone', 'Не указано')}
+
+<b>8. Email для отправки тендеров:</b>
+{user_data.get('email', 'Не указано')}
 
 {'✅ <b>Заполнено в рабочее время</b>' if db.is_working_hours() else '⏰ <b>Заполнено в нерабочее время</b>'}
         """
@@ -1350,16 +1363,26 @@ async def cmd_admin(message: types.Message, state: FSMContext):
 # =========== ОБРАБОТЧИКИ КНОПОК ===========
 @dp.message(F.text == "📝 Заполнить анкету онлайн")
 async def start_online_questionnaire(message: types.Message, state: FSMContext):
-    """Начало заполнения анкеты онлайн"""
+    """Начало заполнения анкеты онлайн - НОВЫЙ ПОРЯДОК"""
     await state.clear()
     
     await message.answer(
         "📝 <b>Заполнение анкеты онлайн</b>\n\n"
-        "Заполнение займет 3-5 минут. Введите ваше <b>ФИО полностью</b>:",
+        "<b>Порядок заполнения:</b>\n"
+        "1. Сфера деятельности компании\n"
+        "2. Регионы работы\n"
+        "3. Бюджет контрактов\n"
+        "4. Ключевые слова для поиска\n"
+        "5. Название компании\n"
+        "6. Ваше ФИО\n"
+        "7. Телефон для связи\n"
+        "8. Email для отправки тендеров\n\n"
+        "Введите <b>сферу деятельности вашей компании</b>:\n"
+        "<i>Пример: строительство, IT-услуги, поставка продуктов питания</i>",
         reply_markup=get_cancel_keyboard(),
         parse_mode=ParseMode.HTML
     )
-    await state.set_state(Questionnaire.waiting_for_name)
+    await state.set_state(Questionnaire.waiting_for_activity)
 
 @dp.message(F.text == "📥 Скачать анкету в Word")
 async def download_questionnaire(message: types.Message, state: FSMContext):
@@ -1380,7 +1403,7 @@ async def download_questionnaire(message: types.Message, state: FSMContext):
                 f"Скачать анкету можно по ссылке:\n{ANKETA_GITHUB_URL}\n\n"
                 "Вы можете заполнить эту анкету и отправить нам:\n\n"
                 "1. 📧 <b>На email:</b> info@tritika.ru\n"
-                "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
+                "2. 🤖 <b>Через бота:</b> кнопка '📤 Написать менеджеру'\n"
                 "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
                 "<i>Или заполните анкету онлайн ниже (быстрее и удобнее)</i>",
                 reply_markup=get_main_keyboard(),
@@ -1474,19 +1497,21 @@ async def cancel_action(message: types.Message, state: FSMContext):
                 reply_markup=get_main_keyboard(),
                 parse_mode=ParseMode.HTML
             )
+    elif current_state in Questionnaire.__states__:
+        await state.clear()
+        await message.answer(
+            "❌ Заполнение анкеты отменено.\n\n"
+            "Вы можете начать заполнение заново в любое время.",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
     else:
         await state.clear()
-        is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
-        
-        if is_admin:
-            await message.answer("❌ Действие отменено", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
-        else:
-            await message.answer(
-                "❌ Заполнение анкеты отменено.\n\n"
-                "Вы можете начать заполнение заново в любое время.",
-                reply_markup=get_main_keyboard(),
-                parse_mode=ParseMode.HTML
-            )
+        await message.answer(
+            "❌ Действие отменено.",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
 
 # =========== ДИАЛОГ С МЕНЕДЖЕРОМ ===========
 @dp.message(ManagerDialog.waiting_for_message)
@@ -1746,7 +1771,8 @@ async def process_export_questionnaire_id(message: types.Message, state: FSMCont
         f"✅ <b>Анкета #{questionnaire_id} найдена</b>\n\n"
         f"👤 <b>Пользователь:</b> {questionnaire['full_name']}\n"
         f"🏢 <b>Компания:</b> {questionnaire['company_name']}\n"
-        f"📧 <b>Email:</b> {questionnaire['email']}\n\n"
+        f"📧 <b>Email:</b> {questionnaire['email']}\n"
+        f"🆔 <b>Telegram ID:</b> {questionnaire['user_id']}\n\n"
         f"Теперь отправьте файл с выгрузкой тендеров:\n"
         f"<i>(Поддерживаются файлы: PDF, Excel, Word, ZIP, RAR)</i>",
         reply_markup=get_cancel_keyboard(),
@@ -1816,6 +1842,7 @@ async def process_export_file(message: types.Message, state: FSMContext):
             f"👤 <b>Пользователь:</b> {questionnaire['full_name']}\n"
             f"🏢 <b>Компания:</b> {questionnaire['company_name']}\n"
             f"📧 <b>Email:</b> {questionnaire['email']}\n"
+            f"🆔 <b>Telegram ID:</b> {questionnaire['user_id']}\n"
             f"🆔 <b>ID выгрузки:</b> {export_id}\n\n"
             f"<i>Подтвердите отправку выгрузки пользователю.</i>",
             reply_markup=keyboard,
@@ -1848,7 +1875,15 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         file_path = export['file_path']
         file_name = export['file_name'] or "Выгрузка_тендеров.pdf"
         
-        if file_path and os.path.exists(file_path):
+        if not file_path or not os.path.exists(file_path):
+            await callback.answer("❌ Файл выгрузки не найден", show_alert=True)
+            return
+        
+        if not user_id:
+            await callback.answer("❌ ID пользователя не найден", show_alert=True)
+            return
+        
+        try:
             # Используем простой способ отправки файла
             with open(file_path, 'rb') as file:
                 input_file = types.InputFile(file, filename=file_name)
@@ -1870,30 +1905,35 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             
             try:
                 os.remove(file_path)
+                logger.info(f"✅ Временный файл удален: {file_path}")
             except Exception as e:
                 logger.error(f"Не удалось удалить временный файл {file_path}: {e}")
             
             await callback.message.edit_text(
-                callback.message.text + "\n\n✅ <b>ВЫГРУЗКА ОТПРАВЛЕНА</b>",
+                callback.message.text + "\n\n✅ <b>ВЫГРУЗКА ОТПРАВЛЕНА ПОЛЬЗОВАТЕЛЮ В TELEGRAM</b>",
                 reply_markup=None,
                 parse_mode=ParseMode.HTML
             )
             
             await callback.message.answer(
-                f"✅ <b>Выгрузка #{export_id} отправлена пользователю</b>\n\n"
+                f"✅ <b>Выгрузка #{export_id} успешно отправлена пользователю</b>\n\n"
                 f"👤 Пользователь: {export['full_name']}\n"
                 f"🏢 Компания: {export['company_name']}\n"
+                f"🆔 Telegram ID: {user_id}\n"
                 f"📄 Файл: {file_name}\n\n"
                 f"<i>Через 1 час пользователь получит follow-up сообщение.</i>",
                 parse_mode=ParseMode.HTML
             )
             
-        else:
-            await callback.answer("Файл выгрузки не найден", show_alert=True)
+            logger.info(f"✅ Выгрузка #{export_id} отправлена пользователю {user_id}")
+            
+        except Exception as e:
+            logger.error(f"❌ Ошибка отправки выгрузки пользователю {user_id}: {e}")
+            await callback.answer(f"❌ Ошибка отправки: {str(e)[:100]}", show_alert=True)
             
     except Exception as e:
-        logger.error(f"Ошибка отправки выгрузки: {e}")
-        await callback.answer(f"Ошибка отправки: {e}", show_alert=True)
+        logger.error(f"❌ Общая ошибка в handle_confirm_export: {e}")
+        await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
 
 @dp.callback_query(F.data.startswith("cancel_export_"))
 async def handle_cancel_export(callback: types.CallbackQuery):
@@ -2955,55 +2995,10 @@ async def switch_to_user_mode(message: types.Message, state: FSMContext):
         parse_mode=ParseMode.HTML
     )
 
-# =========== ЗАПОЛНЕНИЕ АНКЕТЫ ===========
-@dp.message(Questionnaire.waiting_for_name)
-async def process_name(message: types.Message, state: FSMContext):
-    """Обработка ФИО"""
-    await state.update_data(full_name=message.text.strip())
-    await message.answer(
-        "✅ <b>ФИО сохранено</b>\n\n"
-        "Введите <b>полное название вашей компании</b>:",
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(Questionnaire.waiting_for_company)
-
-@dp.message(Questionnaire.waiting_for_company)
-async def process_company(message: types.Message, state: FSMContext):
-    """Обработка названия компании"""
-    await state.update_data(company_name=message.text.strip())
-    await message.answer(
-        "✅ <b>Компания сохранена</b>\n\n"
-        "Введите ваш <b>телефон для связи</b> (в любом формате):",
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(Questionnaire.waiting_for_phone)
-
-@dp.message(Questionnaire.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    """Обработка телефона"""
-    await state.update_data(phone=message.text.strip())
-    await message.answer(
-        "✅ <b>Телефон сохранен</b>\n\n"
-        "Введите ваш <b>email для отправки тендеров</b>:",
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(Questionnaire.waiting_for_email)
-
-@dp.message(Questionnaire.waiting_for_email)
-async def process_email(message: types.Message, state: FSMContext):
-    """Обработка email"""
-    await state.update_data(email=message.text.strip())
-    await message.answer(
-        "✅ <b>Email сохранен</b>\n\n"
-        "Опишите <b>сферу деятельности</b> вашей компании:\n"
-        "<i>Пример: строительство, IT-услуги, поставка продуктов</i>",
-        parse_mode=ParseMode.HTML
-    )
-    await state.set_state(Questionnaire.waiting_for_activity)
-
+# =========== ЗАПОЛНЕНИЕ АНКЕТЫ (НОВЫЙ ПОРЯДОК) ===========
 @dp.message(Questionnaire.waiting_for_activity)
 async def process_activity(message: types.Message, state: FSMContext):
-    """Обработка сферы деятельности"""
+    """Обработка сферы деятельности (первый вопрос)"""
     await state.update_data(activity=message.text.strip())
     await message.answer(
         "✅ <b>Сфера деятельности сохранена</b>\n\n"
@@ -3039,9 +3034,108 @@ async def process_budget(message: types.Message, state: FSMContext):
 
 @dp.message(Questionnaire.waiting_for_keywords)
 async def process_keywords(message: types.Message, state: FSMContext):
+    """Обработка ключевых слов"""
+    await state.update_data(keywords=message.text.strip())
+    await message.answer(
+        "✅ <b>Ключевые слова сохранены</b>\n\n"
+        "Теперь введите <b>полное название вашей компании</b>:",
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(Questionnaire.waiting_for_company)
+
+@dp.message(Questionnaire.waiting_for_company)
+async def process_company(message: types.Message, state: FSMContext):
+    """Обработка названия компании"""
+    await state.update_data(company_name=message.text.strip())
+    await message.answer(
+        "✅ <b>Компания сохранена</b>\n\n"
+        "Введите ваше <b>ФИО полностью</b>:",
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(Questionnaire.waiting_for_name)
+
+@dp.message(Questionnaire.waiting_for_name)
+async def process_name(message: types.Message, state: FSMContext):
+    """Обработка ФИО"""
+    await state.update_data(full_name=message.text.strip())
+    await message.answer(
+        "✅ <b>ФИО сохранено</b>\n\n"
+        "Теперь укажите ваш <b>телефон для связи</b>:\n"
+        "<i>Вы можете поделиться телефоном через кнопку или ввести вручную</i>",
+        reply_markup=get_phone_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(Questionnaire.waiting_for_phone)
+
+@dp.message(Questionnaire.waiting_for_phone)
+async def process_phone(message: types.Message, state: FSMContext):
+    """Обработка телефона с кнопкой "Поделиться телефоном" """
+    phone = None
+    
+    # Если пользователь нажал "Ввести вручную"
+    if message.text == "📝 Ввести вручную":
+        await message.answer(
+            "📝 <b>Введите ваш телефон вручную:</b>\n"
+            "<i>Пример: +7 (999) 123-45-67 или 89991234567</i>",
+            reply_markup=get_cancel_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return  # Остаемся в том же состоянии, ждем ручной ввод
+    
+    # Если пользователь отправил контакт
+    elif message.contact:
+        phone = message.contact.phone_number
+    
+    # Если пользователь ввел телефон вручную
+    elif message.text and message.text != "❌ Отмена":
+        phone = message.text.strip()
+    
+    # Если нажал отмену
+    elif message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer(
+            "❌ Заполнение анкеты отменено.\n\n"
+            "Вы можете начать заполнение заново в любое время.",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    # Если телефон не получен
+    if not phone:
+        await message.answer(
+            "❌ Пожалуйста, укажите ваш телефон.\n"
+            "Используйте кнопку '📱 Поделиться телефоном' или введите вручную.",
+            reply_markup=get_phone_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    await state.update_data(phone=phone)
+    
+    await message.answer(
+        "✅ <b>Телефон сохранен</b>\n\n"
+        "Введите ваш <b>email для отправки тендеров</b>:",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    await state.set_state(Questionnaire.waiting_for_email)
+
+@dp.message(Questionnaire.waiting_for_email)
+async def process_email(message: types.Message, state: FSMContext):
     """Завершение анкеты - СОЗДАНИЕ И ОТПРАВКА ФАЙЛА АНКЕТЫ ПОЛЬЗОВАТЕЛЮ"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer(
+            "❌ Заполнение анкеты отменено.\n\n"
+            "Вы можете начать заполнение заново в любое время.",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
     user_data = await state.get_data()
-    user_data['keywords'] = message.text.strip()
+    user_data['email'] = message.text.strip()
     user_id = message.from_user.id
     username = message.from_user.username or "без username"
     
@@ -3272,4 +3366,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Критическая ошибка при запуске: {e}")
         print(f"❌ Критическая ошибка: {e}")
-
