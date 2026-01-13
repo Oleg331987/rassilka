@@ -765,6 +765,26 @@ class Database:
         
         return export
     
+    def get_user_exports(self, user_id: int):
+        """Получение всех выгрузок пользователя"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT te.*, q.company_name, q.activity
+        FROM tender_exports te
+        JOIN questionnaires q ON te.questionnaire_id = q.id
+        WHERE te.user_id = ?
+        ORDER BY te.sent_at DESC
+        LIMIT 20
+        ''', (user_id,))
+        
+        exports = cursor.fetchall()
+        conn.close()
+        
+        return exports
+    
     def get_statistics(self, days: int = 14):
         """Получение статистики за указанный период"""
         conn = sqlite3.connect(self.db_name)
@@ -1084,6 +1104,16 @@ def get_export_selection_keyboard():
         resize_keyboard=True
     )
 
+def get_export_notification_keyboard():
+    """Клавиатура для уведомления о новой выгрузке"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(text="📊 Посмотреть мои выгрузки", callback_data="my_exports_callback")
+            ]
+        ]
+    )
+
 # =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
     # НОВЫЙ ПОРЯДОК: сначала бизнес-информация, потом контакты
@@ -1219,6 +1249,34 @@ async def send_anketa_file(message: types.Message, file_path: str):
         )
         return True  # Возвращаем True, так как пользователь получил ссылку
 
+# =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ УВЕДОМЛЕНИЯ О НОВОЙ ВЫГРУЗКЕ ===========
+async def send_export_notification_to_user(user_id: int, export_id: int, export_data: dict):
+    """Отправка уведомления пользователю о новой выгрузке"""
+    try:
+        notification_message = f"""
+📨 <b>НОВАЯ ВЫГРУЗКА ТЕНДЕРОВ #{export_id}</b>
+
+🏢 <b>Компания:</b> {export_data.get('company_name', 'Ваша компания')}
+🎯 <b>Сфера:</b> {export_data.get('activity', 'Не указано')}
+📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+<b>Выгрузка успешно подготовлена и отправлена!</b>
+
+<i>Вы можете посмотреть все ваши выгрузки в разделе "📊 Мои выгрузки" или нажав кнопку ниже.</i>
+"""
+        
+        await bot.send_message(
+            user_id,
+            notification_message,
+            reply_markup=get_export_notification_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        
+        logger.info(f"✅ Уведомление о выгрузке #{export_id} отправлено пользователю {user_id}")
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки уведомления о выгрузке пользователю {user_id}: {e}")
+
 # =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ FOLLOW-UP СООБЩЕНИЙ ===========
 async def send_follow_up_messages():
     """Отправка follow-up сообщений через 1 час после выгрузки"""
@@ -1316,32 +1374,23 @@ async def cmd_help(message: types.Message):
 
 @dp.message(Command("my_exports"))
 async def cmd_my_exports(message: types.Message):
-    """Мои выгрузки"""
-    conn = sqlite3.connect("tenders.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    """Мои выгрузки - показываем подробную информацию"""
+    user_id = message.from_user.id
     
-    cursor.execute('''
-    SELECT te.*, q.company_name, q.activity
-    FROM tender_exports te
-    JOIN questionnaires q ON te.questionnaire_id = q.id
-    WHERE te.user_id = ?
-    ORDER BY te.sent_at DESC
-    ''', (message.from_user.id,))
-    
-    exports = cursor.fetchall()
-    conn.close()
+    exports = db.get_user_exports(user_id)
     
     if not exports:
         await message.answer(
-            "📭 У вас пока нет выгрузок тендеров.\n\n"
-            "Хотите получить бесплатную подборку? Заполните анкету!",
+            "📭 <b>У вас пока нет выгрузок тендеров.</b>\n\n"
+            "Хотите получить бесплатную подборку? Заполните анкету!\n\n"
+            "<i>После заполнения анкеты мы подготовим для вас подборку тендеров, "
+            "и она появится в этом разделе.</i>",
             reply_markup=get_main_keyboard(),
             parse_mode=ParseMode.HTML
         )
         return
     
-    response = f"📋 <b>Ваши выгрузки ({len(exports)}):</b>\n\n"
+    response = f"📋 <b>Ваши выгрузки тендеров ({len(exports)}):</b>\n\n"
     
     for i, export in enumerate(exports, 1):
         date_str = export['sent_at'][:10] if export['sent_at'] else "??.??.????"
@@ -1352,14 +1401,27 @@ async def cmd_my_exports(message: types.Message):
             'cancelled': 'Отменена'
         }.get(export['status'], export['status'])
         
-        response += f"{i}. <b>{export['company_name']}</b>\n"
-        response += f"   📅 {date_str} | {status_icon} {status_text}\n"
-        response += f"   🎯 {export['activity'][:30]}...\n"
+        # Добавляем информацию о файле
+        file_info = ""
+        if export['file_name']:
+            file_info = f"📄 {export['file_name']}"
+        elif export['status'] == 'completed':
+            file_info = "📝 Выгрузка отправлена (без файла)"
+        
+        response += f"<b>{i}. #{export['id']} - {export['company_name']}</b>\n"
+        response += f"   📅 <i>Дата запроса:</i> {date_str}\n"
+        response += f"   🎯 <i>Сфера:</i> {export['activity'][:40]}...\n"
+        response += f"   📊 <i>Статус:</i> {status_icon} {status_text}\n"
+        
+        if file_info:
+            response += f"   {file_info}\n"
         
         if export['follow_up_response']:
-            response += f"   💬 Ответ: {export['follow_up_response'][:20]}...\n"
+            response += f"   💬 <i>Ваш ответ:</i> {export['follow_up_response']}\n"
         
         response += "\n"
+    
+    response += "\n<i>Для обновления списка нажмите /my_exports или кнопку '📊 Мои выгрузки'</i>"
     
     await message.answer(response, parse_mode=ParseMode.HTML)
 
@@ -1716,6 +1778,13 @@ async def handle_done_callback(callback: types.CallbackQuery):
     
     await callback.answer("Сообщение отмечено как обработанное")
 
+# =========== CALLBACK ДЛЯ ПОЛЬЗОВАТЕЛЯ ===========
+@dp.callback_query(F.data == "my_exports_callback")
+async def handle_my_exports_callback(callback: types.CallbackQuery):
+    """Обработка кнопки "Посмотреть мои выгрузки" """
+    await cmd_my_exports(callback.message)
+    await callback.answer()
+
 # =========== АДМИН ПАНЕЛЬ ===========
 @dp.message(F.text == "📊 Новые анкеты")
 async def show_new_questionnaires(message: types.Message):
@@ -1918,7 +1987,7 @@ async def process_export_file(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("confirm_export_"))
 async def handle_confirm_export(callback: types.CallbackQuery):
-    """Подтверждение отправки выгрузки"""
+    """Подтверждение отправки выгрузки - ОСНОВНАЯ ИСПРАВЛЕННАЯ ФУНКЦИЯ"""
     if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещен", show_alert=True)
         return
@@ -1955,7 +2024,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                             f"🏢 <b>Компания:</b> {export['company_name']}\n"
                             f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
                             f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                            f"<i>В ближайшее время с вами свяжется менеджер для уточнения деталей.</i>"
+                            f"<i>Выгрузка успешно подготовлена и отправлена. "
+                            f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'</i>"
                         ),
                         parse_mode=ParseMode.HTML
                     )
@@ -1969,10 +2039,17 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                     f"🏢 <b>Компания:</b> {export['company_name']}\n"
                     f"🎯 <b>Сфера:</b> {export.get('activity', 'Не указано')}\n"
                     f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                    f"<i>Выгрузка была подготовлена. Для получения подробной информации свяжитесь с менеджером.</i>",
+                    f"<i>Выгрузка была успешно подготовлена. "
+                    f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'.</i>",
                     parse_mode=ParseMode.HTML
                 )
                 logger.info(f"✅ Уведомление о выгрузке отправлено пользователю {user_id} (без файла)")
+            
+            # Отправляем отдельное уведомление о новой выгрузке
+            await send_export_notification_to_user(user_id, export_id, {
+                'company_name': export['company_name'],
+                'activity': export.get('activity', 'Не указано')
+            })
             
             # Отмечаем выгрузку как завершенную
             db.mark_export_completed(export_id, callback.from_user.first_name)
@@ -1997,7 +2074,8 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 f"🏢 Компания: {export['company_name']}\n"
                 f"🆔 Telegram ID: {user_id}\n"
                 f"{'📄 Файл: ' + file_name if file_name else '📝 Без файла'}\n\n"
-                f"<i>Через 1 час пользователь получит follow-up сообщение.</i>",
+                f"<i>Пользователь получил уведомление о новой выгрузке. "
+                f"Через 1 час он получит follow-up сообщение.</i>",
                 parse_mode=ParseMode.HTML
             )
             
@@ -2248,7 +2326,7 @@ async def handle_toggle_subscription(callback: types.CallbackQuery):
     user_name = f"{user_info['first_name']} {user_info['last_name'] or ''}".strip()
     
     await callback.message.edit_text(
-        f"👤 <b>Управление подпиской пользователя</b>\n\n"
+        f"👤 <b>Управление подписки пользователя</b>\n\n"
         f"<b>Пользователь:</b> {user_name}\n"
         f"<b>ID:</b> {user_id}\n"
         f"<b>Текущий статус:</b> {'✅ Подписан на рассылку' if new_status else '❌ Отписан от рассылки'}\n\n"
@@ -3424,6 +3502,7 @@ async def main():
     print("\n🔄 Ожидание сообщений...")
     print(f"🌐 Health check активен на порту {PORT}\n")
     print("⏰ Follow-up система активна (проверка каждые 5 минут)")
+    print("📨 Система уведомлений о новых выгрузках активна")
     
     # Запускаем polling бота
     try:
@@ -3447,6 +3526,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Критическая ошибка при запуске: {e}")
         print(f"❌ Критическая ошибка: {e}")
-
-
-
