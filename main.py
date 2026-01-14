@@ -2043,13 +2043,14 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                         f"<i>Выгрузка успешно подготовлена и отправлена. "
                         f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'</i>"
                     ),
+                    reply_markup=get_export_notification_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
                 
                 logger.info(f"✅ Файл выгрузки отправлен пользователю {user_id}: {file_path}")
                 
-                # Отправляем уведомление о новой выгрузке
-                await send_export_notification_to_user(user_id, export_id)
+                # УДАЛЕНО: Убрал дублирующее уведомление
+                # await send_export_notification_to_user(user_id, export_id)
                 
             else:
                 # Отправляем сообщение без файла
@@ -2059,12 +2060,13 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                     f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
                     f"<i>Выгрузка была успешно подготовлена. "
                     f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'.</i>",
+                    reply_markup=get_export_notification_keyboard(),
                     parse_mode=ParseMode.HTML
                 )
                 logger.info(f"✅ Уведомление о выгрузке отправлено пользователю {user_id} (без файла)")
                 
-                # Отправляем уведомление о новой выгрузке
-                await send_export_notification_to_user(user_id, export_id)
+                # УДАЛЕНО: Убрал дублирующее уведомление
+                # await send_export_notification_to_user(user_id, export_id)
             
             # Отмечаем выгрузку как завершенную
             db.mark_export_completed(export_id, callback.from_user.first_name)
