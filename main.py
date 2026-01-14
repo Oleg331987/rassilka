@@ -23,8 +23,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
     InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove, BufferedInputFile, InputFile, FSInputFile,
-    Contact
+    ReplyKeyboardRemove, BufferedInputFile, FSInputFile
 )
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
@@ -1169,16 +1168,21 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         """
         
         if anketa_path and os.path.exists(anketa_path):
-            # Используем простой способ отправки файла
-            with open(anketa_path, 'rb') as file:
-                input_file = types.InputFile(file, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
-                
-                await bot.send_document(
-                    ADMIN_ID,
-                    document=input_file,
-                    caption=admin_message,
-                    parse_mode=ParseMode.HTML
-                )
+            # Используем BufferedInputFile для отправки файла
+            with open(anketa_path, 'rb') as f:
+                file_content = f.read()
+            
+            input_file = BufferedInputFile(
+                file_content,
+                filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx"
+            )
+            
+            await bot.send_document(
+                ADMIN_ID,
+                document=input_file,
+                caption=admin_message,
+                parse_mode=ParseMode.HTML
+            )
             
             logger.info(f"Анкета #{questionnaire_id} с файлом отправлена администратору {ADMIN_ID}")
         else:
@@ -1198,8 +1202,14 @@ async def send_anketa_file(message: types.Message, file_path: str):
             await message.answer("❌ Файл анкеты не найден. Попробуйте позже.")
             return False
         
-        # Используем простой способ отправки файла
-        input_file = types.InputFile(file_path, filename="Анкета_Тритика_шаблон.docx")
+        # Используем BufferedInputFile для отправки файла
+        with open(file_path, 'rb') as f:
+            file_content = f.read()
+        
+        input_file = BufferedInputFile(
+            file_content,
+            filename="Анкета_Тритика_шаблон.docx"
+        )
         
         await message.answer_document(
             document=input_file,
@@ -1209,7 +1219,7 @@ async def send_anketa_file(message: types.Message, file_path: str):
                 "1. 📧 <b>На email:</b> info@tritika.ru\n"
                 "2. 🤖 <b>Через бота:</b> кнопка 'Написать менеджеру'\n"
                 "3. 👨‍💼 <b>Менеджеру в Telegram:</b> @tritikaru\n\n"
-                ),
+            ),
             parse_mode=ParseMode.HTML
         )
         
@@ -2014,21 +2024,26 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         try:
             # Если есть файл, отправляем его пользователю
             if file_path and os.path.exists(file_path):
-                # Используем простой способ отправки файла
-                with open(file_path, 'rb') as file:
-                    input_file = types.InputFile(file, filename=file_name or "Выгрузка_тендеров.pdf")
-                    
-                    await bot.send_document(
-                        user_id,
-                        document=input_file,
-                        caption=(
-                            f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                            f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                            f"<i>Выгрузка успешно подготовлена и отправлена. "
-                            f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'</i>"
-                        ),
-                        parse_mode=ParseMode.HTML
-                    )
+                # Используем BufferedInputFile для отправки файла
+                with open(file_path, 'rb') as f:
+                    file_content = f.read()
+                
+                input_file = BufferedInputFile(
+                    file_content,
+                    filename=file_name or "Выгрузка_тендеров.pdf"
+                )
+                
+                await bot.send_document(
+                    user_id,
+                    document=input_file,
+                    caption=(
+                        f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
+                        f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                        f"<i>Выгрузка успешно подготовлена и отправлена. "
+                        f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'</i>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
                 
                 logger.info(f"✅ Файл выгрузки отправлен пользователю {user_id}: {file_path}")
                 
@@ -3321,22 +3336,27 @@ async def process_email(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Используем простой способ отправки файла
-                with open(anketa_path, 'rb') as file:
-                    input_file = types.InputFile(file, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
-                    
-                    await message.answer_document(
-                        document=input_file,
-                        caption=(
-                            "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
-                            "✅ <b>Вы можете:</b>\n"
-                            "1. Сохранить этот файл на компьютере\n"
-                            "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
-                            "3. Или мы обработаем ее автоматически\n\n"
-                            "<i>Анкета также отправлена менеджеру для обработки.</i>"
-                        ),
-                        parse_mode=ParseMode.HTML
-                    )
+                # Используем BufferedInputFile для отправки файла
+                with open(anketa_path, 'rb') as f:
+                    file_content = f.read()
+                
+                input_file = BufferedInputFile(
+                    file_content,
+                    filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
+                )
+                
+                await message.answer_document(
+                    document=input_file,
+                    caption=(
+                        "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
+                        "✅ <b>Вы можете:</b>\n"
+                        "1. Сохранить этот файл на компьютере\n"
+                        "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
+                        "3. Или мы обработаем ее автоматически\n\n"
+                        "<i>Анкета также отправлена менеджеру для обработки.</i>"
+                    ),
+                    parse_mode=ParseMode.HTML
+                )
                 
                 questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
                 
