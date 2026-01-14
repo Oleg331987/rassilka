@@ -1168,12 +1168,9 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         """
         
         if anketa_path and os.path.exists(anketa_path):
-            # Читаем файл в байты и создаем BufferedInputFile
-            with open(anketa_path, 'rb') as f:
-                file_bytes = f.read()
-            
-            input_file = BufferedInputFile(
-                file_bytes,
+            # Используем FSInputFile для отправки файла с диска
+            input_file = FSInputFile(
+                anketa_path,
                 filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx"
             )
             
@@ -1202,12 +1199,9 @@ async def send_anketa_file(message: types.Message, file_path: str):
             await message.answer("❌ Файл анкеты не найден. Попробуйте позже.")
             return False
         
-        # Читаем файл в байты и создаем BufferedInputFile
-        with open(file_path, 'rb') as f:
-            file_bytes = f.read()
-        
-        input_file = BufferedInputFile(
-            file_bytes,
+        # Используем FSInputFile для отправки файла с диска
+        input_file = FSInputFile(
+            file_path,
             filename="Анкета_Тритика_шаблон.docx"
         )
         
@@ -1282,7 +1276,7 @@ async def send_export_notification_to_user(user_id: int, export_id: int, export_
 
 # =========== ФУНКЦИЯ ДЛЯ ОТПРАВКИ FOLLOW-UP СООБЩЕНИЙ ===========
 async def send_follow_up_messages():
-    """Отправка follow-up сообщений через 1 час после выгрузки"""
+    """Отправка follow-up сообщений через 1 час после выгрузке"""
     try:
         exports = db.get_exports_for_followup()
         
@@ -1994,7 +1988,7 @@ async def process_export_file(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("confirm_export_"))
 async def handle_confirm_export(callback: types.CallbackQuery):
-    """Подтверждение отправки выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Подтверждение отправки выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ С FSInputFile"""
     if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещен", show_alert=True)
         return
@@ -2024,12 +2018,9 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         try:
             # Если есть файл, отправляем его пользователю
             if file_path and os.path.exists(file_path):
-                # Читаем файл в байты и создаем BufferedInputFile
-                with open(file_path, 'rb') as f:
-                    file_bytes = f.read()
-                
-                input_file = BufferedInputFile(
-                    file_bytes,
+                # Используем FSInputFile для отправки файла с диска
+                input_file = FSInputFile(
+                    file_path,
                     filename=file_name or "Выгрузка_тендеров.pdf"
                 )
                 
@@ -3336,12 +3327,9 @@ async def process_email(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Читаем файл в байты и создаем BufferedInputFile
-                with open(anketa_path, 'rb') as f:
-                    file_bytes = f.read()
-                
-                input_file = BufferedInputFile(
-                    file_bytes,
+                # Используем FSInputFile для отправки файла с диска
+                input_file = FSInputFile(
+                    anketa_path,
                     filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
                 )
                 
