@@ -1168,14 +1168,7 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         """
         
         if anketa_path and os.path.exists(anketa_path):
-            # Используем BufferedInputFile для отправки файла
-            with open(anketa_path, 'rb') as f:
-                file_content = f.read()
-            
-            input_file = BufferedInputFile(
-                file_content,
-                filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx"
-            )
+            input_file = FSInputFile(anketa_path, filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx")
             
             await bot.send_document(
                 ADMIN_ID,
@@ -1202,14 +1195,7 @@ async def send_anketa_file(message: types.Message, file_path: str):
             await message.answer("❌ Файл анкеты не найден. Попробуйте позже.")
             return False
         
-        # Используем BufferedInputFile для отправки файла
-        with open(file_path, 'rb') as f:
-            file_content = f.read()
-        
-        input_file = BufferedInputFile(
-            file_content,
-            filename="Анкета_Тритика_шаблон.docx"
-        )
+        input_file = FSInputFile(file_path, filename="Анкета_Тритика_шаблон.docx")
         
         await message.answer_document(
             document=input_file,
@@ -2024,14 +2010,7 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         try:
             # Если есть файл, отправляем его пользователю
             if file_path and os.path.exists(file_path):
-                # Используем BufferedInputFile для отправки файла
-                with open(file_path, 'rb') as f:
-                    file_content = f.read()
-                
-                input_file = BufferedInputFile(
-                    file_content,
-                    filename=file_name or "Выгрузка_тендеров.pdf"
-                )
+                input_file = FSInputFile(file_path, filename=file_name or "Выгрузка_тендеров.pdf")
                 
                 await bot.send_document(
                     user_id,
@@ -3336,14 +3315,7 @@ async def process_email(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Используем BufferedInputFile для отправки файла
-                with open(anketa_path, 'rb') as f:
-                    file_content = f.read()
-                
-                input_file = BufferedInputFile(
-                    file_content,
-                    filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
-                )
+                input_file = FSInputFile(anketa_path, filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx")
                 
                 await message.answer_document(
                     document=input_file,
