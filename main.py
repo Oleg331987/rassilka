@@ -1168,9 +1168,12 @@ async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_
         """
         
         if anketa_path and os.path.exists(anketa_path):
-            # Используем FSInputFile для отправки файла с диска
-            input_file = FSInputFile(
-                anketa_path,
+            # Используем BufferedInputFile для отправки файла
+            with open(anketa_path, 'rb') as f:
+                file_data = f.read()
+            
+            input_file = BufferedInputFile(
+                file_data,
                 filename=f"Анкета_{questionnaire_id}_{username or 'user'}.docx"
             )
             
@@ -1199,9 +1202,12 @@ async def send_anketa_file(message: types.Message, file_path: str):
             await message.answer("❌ Файл анкеты не найден. Попробуйте позже.")
             return False
         
-        # Используем FSInputFile для отправки файла с диска
-        input_file = FSInputFile(
-            file_path,
+        # Используем BufferedInputFile для отправки файла
+        with open(file_path, 'rb') as f:
+            file_data = f.read()
+        
+        input_file = BufferedInputFile(
+            file_data,
             filename="Анкета_Тритика_шаблон.docx"
         )
         
@@ -1378,10 +1384,9 @@ async def cmd_my_exports(message: types.Message):
     
     if not exports:
         await message.answer(
-            "📭 <b>У вас пока нет выгрузок тендеров.</b>\n\n"
+            "📭 <b>У вас пока нет выгрузки тендеров.</b>\n\n"
             "Хотите получить бесплатную подборку? Заполните анкету!\n\n"
-            "<i>После заполнения анкеты мы подготовим для вас подборку тендеров, 
-            и она появится в этом разделе.</i>",
+            "<i>После заполнения анкеты мы подготовим для вас подборку тендеров, и она появится в этом разделе.</i>",
             reply_markup=get_main_keyboard(),
             parse_mode=ParseMode.HTML
         )
@@ -1876,7 +1881,7 @@ async def process_export_user_id(message: types.Message, state: FSMContext):
 
 @dp.message(SendExport.waiting_for_export_file)
 async def process_export_file(message: types.Message, state: FSMContext):
-    """Обработка файла выгрузки"""
+    """Обработка файла выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
@@ -1912,7 +1917,8 @@ async def process_export_file(message: types.Message, state: FSMContext):
             
             # Создаем уникальное имя файла для экспорта
             timestamp = int(datetime.now().timestamp())
-            export_filename = f"export_{user_id}_{timestamp}_{file_name}"
+            safe_file_name = "".join([c if c.isalnum() or c in "._-" else "_" for c in file_name])
+            export_filename = f"export_{user_id}_{timestamp}_{safe_file_name}"
             export_path = os.path.join(EXPORTS_DIR, export_filename)
             
             # Скачиваем файл в папку exports
@@ -1988,7 +1994,7 @@ async def process_export_file(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("confirm_export_"))
 async def handle_confirm_export(callback: types.CallbackQuery):
-    """Подтверждение отправки выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ С FSInputFile"""
+    """Подтверждение отправки выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ С BufferedInputFile"""
     if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещен", show_alert=True)
         return
@@ -2018,9 +2024,13 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         try:
             # Если есть файл, отправляем его пользователю
             if file_path and os.path.exists(file_path):
-                # Используем FSInputFile для отправки файла с диска
-                input_file = FSInputFile(
-                    file_path,
+                # Читаем файл как бинарный
+                with open(file_path, 'rb') as f:
+                    file_data = f.read()
+                
+                # Создаем BufferedInputFile
+                input_file = BufferedInputFile(
+                    file_data,
                     filename=file_name or "Выгрузка_тендеров.pdf"
                 )
                 
@@ -2316,7 +2326,7 @@ async def handle_manage_user(callback: types.CallbackQuery):
     username = f"@{user_info['username']}" if user_info['username'] else "без username"
     
     await callback.message.edit_text(
-        f"👤 <b>Управление подпиской пользователя</b>\n\n"
+        f"👤 <b>Управление подписки пользователя</b>\n\n"
         f"<b>Пользователь:</b> {user_name}\n"
         f"<b>Username:</b> {username}\n"
         f"<b>ID:</b> {user_id}\n"
@@ -2832,7 +2842,7 @@ async def handle_mailing_feedback(callback: types.CallbackQuery, state: FSMConte
                 feedback_text_map.get(feedback_type, "")
             )
             
-            feedback_icon = "👍" if feedback_type == "like" else "👎"
+            feedback_icon = "👍" if feedback_type == "like" else "👎" if feedback_type == "dislike" else "💬" if feedback_type == "comment" else "🚫"
             await callback.message.edit_text(
                 callback.message.text + f"\n\n{feedback_icon} <b>Спасибо за ваш отзыв!</b>",
                 reply_markup=None,
@@ -3327,9 +3337,12 @@ async def process_email(message: types.Message, state: FSMContext):
         
         if anketa_path:
             try:
-                # Используем FSInputFile для отправки файла с диска
-                input_file = FSInputFile(
-                    anketa_path,
+                # Используем BufferedInputFile для отправки файла
+                with open(anketa_path, 'rb') as f:
+                    file_data = f.read()
+                
+                input_file = BufferedInputFile(
+                    file_data,
                     filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
                 )
                 
