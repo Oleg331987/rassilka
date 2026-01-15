@@ -186,7 +186,7 @@ class Database:
         )
         ''')
         
-        # Анкеты (отдельная таблица для истории)
+        # Анкеты (отдельная таблица для истории) с статусом
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS questionnaires (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -279,6 +279,18 @@ class Database:
         )
         ''')
         
+        # Запросы контактов для выгрузок
+        cursor.execute('''
+        CREATE TABLE IF NOT EXISTS contact_requests (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            export_id INTEGER,
+            requested_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            completed BOOLEAN DEFAULT 0,
+            completed_at TIMESTAMP
+        )
+        ''')
+        
         conn.commit()
         conn.close()
         logger.info("✅ База данных инициализирована")
@@ -297,15 +309,50 @@ class Database:
         conn.close()
         return True
     
-    def save_questionnaire(self, user_id: int, data: dict, anketa_path: str = None):
-        """Сохранение анкеты (новый порядок полей)"""
+    def save_questionnaire_partial(self, user_id: int, data: dict):
+        """Сохранение частичной анкеты (только вопросы 1-4)"""
         conn = sqlite3.connect(self.db_name)
         cursor = conn.cursor()
         
         cursor.execute('''
         INSERT INTO questionnaires 
-        (user_id, full_name, company_name, phone, email, activity, region, budget, keywords, filled_anketa_path)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (user_id, activity, region, budget, keywords, status)
+        VALUES (?, ?, ?, ?, ?, 'partial')
+        ''', (
+            user_id,
+            data.get('activity'),
+            data.get('region'),
+            data.get('budget'),
+            data.get('keywords')
+        ))
+        
+        conn.commit()
+        last_id = cursor.lastrowid
+        
+        cursor.execute('''
+        UPDATE users 
+        SET activity = ?, region = ?, has_filled_questionnaire = 1
+        WHERE user_id = ?
+        ''', (
+            data.get('activity'),
+            data.get('region'),
+            user_id
+        ))
+        
+        conn.commit()
+        conn.close()
+        
+        return last_id
+    
+    def save_questionnaire(self, user_id: int, data: dict, anketa_path: str = None):
+        """Сохранение полной анкеты (все 8 вопросов)"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO questionnaires 
+        (user_id, full_name, company_name, phone, email, activity, region, budget, keywords, filled_anketa_path, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'complete')
         ''', (
             user_id,
             data.get('full_name'),
@@ -339,6 +386,38 @@ class Database:
         conn.close()
         
         return last_id
+    
+    def update_partial_to_complete(self, user_id: int, data: dict):
+        """Обновление частичной анкеты до полной (добавление контактов)"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        UPDATE questionnaires 
+        SET company_name = ?, full_name = ?, phone = ?, email = ?, status = 'complete'
+        WHERE user_id = ? AND status = 'partial'
+        ''', (
+            data.get('company_name'),
+            data.get('full_name'),
+            data.get('phone'),
+            data.get('email'),
+            user_id
+        ))
+        
+        cursor.execute('''
+        UPDATE users 
+        SET phone = ?, email = ?, company = ?
+        WHERE user_id = ?
+        ''', (
+            data.get('phone'),
+            data.get('email'),
+            data.get('company_name'),
+            user_id
+        ))
+        
+        conn.commit()
+        conn.close()
+        return True
     
     def create_tender_export(self, user_id: int, file_path: str = None, file_name: str = None):
         """Создание записи о выгрузке тендеров - УПРОЩЕННАЯ ВЕРСИЯ"""
@@ -867,8 +946,8 @@ class Database:
         next_work_day = now + timedelta(days=days_to_add)
         return next_work_day.replace(hour=WORK_START_HOUR, minute=0, second=0, microsecond=0)
 
-    def get_new_questionnaires(self):
-        """Получение новых анкет (без выгрузки со статусом 'completed')"""
+    def get_partial_questionnaires(self):
+        """Получение частичных анкет (только 1-4 вопросы)"""
         conn = sqlite3.connect(self.db_name)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
@@ -877,6 +956,7 @@ class Database:
         SELECT q.*, u.username 
         FROM questionnaires q
         LEFT JOIN users u ON q.user_id = u.user_id
+        WHERE q.status = 'partial'
         ORDER BY q.created_at DESC
         LIMIT 20
         ''')
@@ -886,23 +966,55 @@ class Database:
         
         return questionnaires
     
-    def get_pending_exports_for_questionnaire(self, questionnaire_id: int):
-        """Получение ожидающих выгрузок для конкретной анкеты"""
+    def get_complete_questionnaires(self):
+        """Получение полных анкет"""
         conn = sqlite3.connect(self.db_name)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
         
         cursor.execute('''
-        SELECT * FROM tender_exports 
-        WHERE questionnaire_id = ? 
-        AND status = 'pending'
-        ORDER BY sent_at DESC
-        ''', (questionnaire_id,))
+        SELECT q.*, u.username 
+        FROM questionnaires q
+        LEFT JOIN users u ON q.user_id = u.user_id
+        WHERE q.status = 'complete'
+        ORDER BY q.created_at DESC
+        LIMIT 20
+        ''')
         
-        exports = cursor.fetchall()
+        questionnaires = cursor.fetchall()
         conn.close()
         
-        return exports
+        return questionnaires
+    
+    def create_contact_request(self, user_id: int, export_id: int):
+        """Создание запроса контактов для выгрузки"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        INSERT INTO contact_requests (user_id, export_id)
+        VALUES (?, ?)
+        ''', (user_id, export_id))
+        
+        conn.commit()
+        request_id = cursor.lastrowid
+        conn.close()
+        
+        return request_id
+    
+    def mark_contact_request_completed(self, export_id: int):
+        """Отметка запроса контактов как выполненного"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        UPDATE contact_requests 
+        SET completed = 1, completed_at = datetime('now')
+        WHERE export_id = ?
+        ''', (export_id,))
+        
+        conn.commit()
+        conn.close()
     
     def create_tender_export_without_file(self, user_id: int):
         """Создание записи о выгрузке без файла"""
@@ -953,6 +1065,7 @@ def get_main_keyboard():
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Заполнить анкету онлайн")],
+            [KeyboardButton(text="📱 Поделиться телефоном", request_contact=True)],
             [KeyboardButton(text="📥 Скачать анкету в Word")],
             [KeyboardButton(text="📤 Написать менеджеру")],
             [KeyboardButton(text="📊 Мои выгрузки")],
@@ -977,7 +1090,7 @@ def get_admin_keyboard():
     """Клавиатура администратора"""
     return ReplyKeyboardMarkup(
         keyboard=[
-            [KeyboardButton(text="📊 Новые анкеты"), KeyboardButton(text="📤 Отправить выгрузку")],
+            [KeyboardButton(text="📊 Частичные анкеты"), KeyboardButton(text="📤 Отправить выгрузку")],
             [KeyboardButton(text="📈 Статистика"), KeyboardButton(text="📨 Создать рассылку")],
             [KeyboardButton(text="👥 Управление подписками"), KeyboardButton(text="📩 Сообщения менеджеру")],
             [KeyboardButton(text="📋 Обратная связь"), KeyboardButton(text="⚙️ Настройки")],
@@ -1096,13 +1209,23 @@ def get_export_notification_keyboard():
         ]
     )
 
+def get_request_contacts_keyboard(export_id: int):
+    """Клавиатура для запроса контактов у пользователя"""
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="📝 Заполнить контакты для получения выгрузки", callback_data=f"fill_contacts_{export_id}")]
+        ]
+    )
+
 # =========== СОСТОЯНИЯ ===========
 class Questionnaire(StatesGroup):
-    # НОВЫЙ ПОРЯДОК: сначала бизнес-информация, потом контакты
+    # Первая часть (1-4 вопросы)
     waiting_for_activity = State()
     waiting_for_region = State()
     waiting_for_budget = State()
     waiting_for_keywords = State()
+    
+    # Вторая часть (5-8 вопросы) - для получения выгрузки
     waiting_for_company = State()
     waiting_for_name = State()
     waiting_for_phone = State()
@@ -1123,7 +1246,53 @@ class SendExport(StatesGroup):
     waiting_for_user_id = State()
     waiting_for_export_file = State()
 
-# =========== ФУНКЦИЯ ОТПРАВКИ АНКЕТЫ АДМИНИСТРАТОРУ ===========
+class ExportContacts(StatesGroup):
+    """Состояния для сбора контактов перед отправкой выгрузки"""
+    waiting_for_company = State()
+    waiting_for_name = State()
+    waiting_for_phone = State()
+    waiting_for_email = State()
+
+# =========== ФУНКЦИЯ ОТПРАВКИ ЧАСТИЧНОЙ АНКЕТЫ АДМИНИСТРАТОРУ ===========
+async def send_partial_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_data: dict, username: str):
+    """Отправка первой части анкеты администратору"""
+    if not ADMIN_ID:
+        logger.warning("ADMIN_ID не установлен, анкета не отправлена администратору")
+        return
+    
+    try:
+        admin_message = f"""
+📋 <b>ЧАСТИЧНАЯ АНКЕТА #{questionnaire_id} (1-4 пункты)</b>
+
+👤 <b>Пользователь:</b> @{username or 'без username'}
+🆔 <b>Telegram ID:</b> {user_id}
+📅 <b>Дата заполнения:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}
+
+<b>Данные анкеты (1-4):</b>
+
+<b>1. Сфера деятельности компании:</b>
+{user_data.get('activity', 'Не указано')}
+
+<b>2. Регионы работы:</b>
+{user_data.get('region', 'Не указано')}
+
+<b>3. Бюджет контрактов:</b>
+{user_data.get('budget', 'Не указано')}
+
+<b>4. Ключевые слова для поиска:</b>
+{user_data.get('keywords', 'Не указано')}
+
+<i>Пользователь ожидает выгрузку тендеров.
+Для завершения анкеты нужны контакты (пункты 5-8).</i>
+        """
+        
+        await bot.send_message(ADMIN_ID, admin_message, parse_mode=ParseMode.HTML)
+        logger.info(f"Частичная анкета #{questionnaire_id} отправлена администратору")
+        
+    except Exception as e:
+        logger.error(f"Ошибка при отправке частичной анкеты администратору: {e}")
+
+# =========== ФУНКЦИЯ ОТПРАВКИ ПОЛНОЙ АНКЕТЫ АДМИНИСТРАТОРУ ===========
 async def send_questionnaire_to_admin(questionnaire_id: int, user_id: int, user_data: dict, username: str, anketa_path: str = None):
     """Отправка заполненной анкеты администратору"""
     if not ADMIN_ID:
@@ -1321,6 +1490,92 @@ async def schedule_follow_ups():
         
         await asyncio.sleep(300)
 
+# =========== ФУНКЦИЯ ЗАПРОСА КОНТАКТОВ ДЛЯ ВЫГРУЗКИ ===========
+async def send_contacts_request(user_id: int, export_id: int, export_data: dict):
+    """Отправка запроса на контакты пользователю"""
+    try:
+        message_text = f"""
+📋 <b>Мы проанализировали вашу анкету!</b>
+
+✅ <b>Подготовили для Вас список тендеров</b>
+
+🎯 <b>По вашим критериям:</b>
+• Сфера: {export_data.get('activity', 'Ваша сфера деятельности')}
+• Регионы: {export_data.get('region', 'Ваши регионы')}
+• Бюджет: {export_data.get('budget', 'Ваш бюджет')}
+
+📄 <b>Для получения выгрузки тендеров оставьте свои контакты:</b>
+
+<i>Заполните оставшиеся пункты анкеты, и мы сразу отправим вам подготовленную выгрузку.</i>
+"""
+        
+        # Создаем новую запись о запросе контактов
+        db.create_contact_request(user_id, export_id)
+        
+        # Отправляем сообщение пользователю с кнопкой для заполнения контактов
+        await bot.send_message(
+            user_id,
+            message_text,
+            reply_markup=get_request_contacts_keyboard(export_id),
+            parse_mode=ParseMode.HTML
+        )
+        
+        logger.info(f"Запрос контактов отправлен пользователю {user_id} для выгрузки #{export_id}")
+        
+    except Exception as e:
+        logger.error(f"Ошибка отправки запроса контактов пользователю {user_id}: {e}")
+
+# =========== ФУНКЦИЯ ОТПРАВКИ ВЫГРУЗКИ ПОЛЬЗОВАТЕЛЮ ===========
+async def send_export_to_user(export_id: int, export_data: dict):
+    """Отправка выгрузки пользователю (если контакты уже есть)"""
+    user_id = export_data['user_id']
+    file_path = export_data['file_path']
+    file_name = export_data['file_name']
+    
+    await send_export_file_to_user(user_id, file_path, file_name, export_id)
+
+async def send_export_file_to_user(user_id: int, file_path: str, file_name: str, export_id: int):
+    """Отправка файла выгрузки пользователю"""
+    try:
+        if file_path and os.path.exists(file_path):
+            with open(file_path, 'rb') as f:
+                file_data = f.read()
+            
+            input_file = BufferedInputFile(
+                file_data,
+                filename=file_name or "Выгрузка_тендеров.pdf"
+            )
+            
+            await bot.send_document(
+                user_id,
+                document=input_file,
+                caption=(
+                    f"📨 <b>Ваша выгрузка тендеров #{export_id} готова!</b>\n\n"
+                    f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                    f"<i>Выгрузка успешно подготовлена по вашим критериям.</i>\n"
+                    f"<i>Вы можете посмотреть ее в разделе '📊 Мои выгрузки'</i>"
+                ),
+                parse_mode=ParseMode.HTML
+            )
+            
+            logger.info(f"✅ Файл выгрузки #{export_id} отправлен пользователю {user_id}")
+            
+            # Обновляем статус выгрузки
+            db.mark_export_completed(export_id, "Автоматическая отправка")
+        else:
+            await bot.send_message(
+                user_id,
+                f"📨 <b>Ваша выгрузка тендеров #{export_id} готова!</b>\n\n"
+                f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
+                f"<i>Выгрузка была успешно подготовлена. "
+                f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'.</i>",
+                parse_mode=ParseMode.HTML
+            )
+            logger.info(f"✅ Уведомление о выгрузке отправлено пользователю {user_id} (без файла)")
+            
+    except Exception as e:
+        logger.error(f"❌ Ошибка отправки выгрузки пользователю {user_id}: {e}")
+
 # =========== ОБРАБОТЧИКИ КОМАНД ===========
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message, state: FSMContext):
@@ -1441,23 +1696,44 @@ async def cmd_admin(message: types.Message, state: FSMContext):
     else:
         await message.answer("⛔ У вас нет прав доступа к панели администратора.", parse_mode=ParseMode.HTML)
 
+# =========== ОБРАБОТЧИК КОНТАКТА ИЗ ГЛАВНОГО МЕНЮ ===========
+@dp.message(F.contact)
+async def handle_main_phone_contact(message: types.Message):
+    """Обработка контакта из главного меню"""
+    user = message.from_user
+    user_id = user.id
+    
+    phone = message.contact.phone_number
+    
+    # Сохраняем телефон в базе данных
+    conn = sqlite3.connect("tenders.db")
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+    UPDATE users 
+    SET phone = ?
+    WHERE user_id = ?
+    ''', (phone, user_id))
+    
+    conn.commit()
+    conn.close()
+    
+    await message.answer(
+        f"✅ <b>Телефон сохранен!</b>\n\n"
+        f"📱 <b>Ваш телефон:</b> {phone}\n\n"
+        f"Теперь вы можете заполнить анкету для поиска тендеров.",
+        reply_markup=get_main_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+
 # =========== ОБРАБОТЧИКИ КНОПОК ===========
 @dp.message(F.text == "📝 Заполнить анкету онлайн")
 async def start_online_questionnaire(message: types.Message, state: FSMContext):
-    """Начало заполнения анкеты онлайн - НОВЫЙ ПОРЯДОК"""
+    """Начало заполнения анкеты онлайн - БЕЗ показа порядка"""
     await state.clear()
     
     await message.answer(
         "📝 <b>Заполнение анкеты онлайн</b>\n\n"
-        "<b>Порядок заполнения:</b>\n"
-        "1. Сфера деятельности компании\n"
-        "2. Регионы работы\n"
-        "3. Бюджет контрактов\n"
-        "4. Ключевые слова для поиска\n"
-        "5. Название компании\n"
-        "6. Ваше ФИО\n"
-        "7. Телефон для связи\n"
-        "8. Email для отправки тендеров\n\n"
         "Введите <b>сферу деятельности вашей компании</b>:\n"
         "<i>Пример: строительство, IT-услуги, поставка продуктов питания</i>",
         reply_markup=get_cancel_keyboard(),
@@ -1561,7 +1837,11 @@ async def cancel_action(message: types.Message, state: FSMContext):
                          ManualMailing.waiting_for_confirmation,
                          FeedbackComment.waiting_for_comment,
                          SendExport.waiting_for_user_id,
-                         SendExport.waiting_for_export_file]:
+                         SendExport.waiting_for_export_file,
+                         ExportContacts.waiting_for_company,
+                         ExportContacts.waiting_for_name,
+                         ExportContacts.waiting_for_phone,
+                         ExportContacts.waiting_for_email]:
         await state.clear()
         is_admin = ADMIN_ID and message.from_user.id == ADMIN_ID
         
@@ -1786,35 +2066,35 @@ async def handle_my_exports_callback(callback: types.CallbackQuery):
     await callback.answer()
 
 # =========== АДМИН ПАНЕЛЬ ===========
-@dp.message(F.text == "📊 Новые анкеты")
-async def show_new_questionnaires(message: types.Message):
-    """Показать новые анкеты"""
+@dp.message(F.text == "📊 Частичные анкеты")
+async def show_partial_questionnaires(message: types.Message):
+    """Показать частичные анкеты (только 1-4 пункты)"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
     
-    questionnaires = db.get_new_questionnaires()
+    questionnaires = db.get_partial_questionnaires()
     
     if not questionnaires:
-        await message.answer("📭 Анкет нет", parse_mode=ParseMode.HTML)
+        await message.answer("📭 Частичных анкет нет", parse_mode=ParseMode.HTML)
         return
     
-    response = f"📋 <b>Все анкеты ({len(questionnaires)}):</b>\n\n"
+    response = f"📋 <b>Частичные анкеты (ожидают выгрузку) ({len(questionnaires)}):</b>\n\n"
     
     for i, q in enumerate(questionnaires, 1):
         date_str = q['created_at'][:16] if q['created_at'] else "??.?? ??:??"
-        response += f"<b>{i}. #{q['id']} - {q['company_name']}</b>\n"
-        response += f"👤 {q['full_name']} (@{q['username'] or 'без username'})\n"
-        response += f"📞 {q['phone']}\n"
-        response += f"📧 {q['email']}\n"
+        response += f"<b>{i}. #{q['id']}</b>\n"
+        response += f"👤 @{q['username'] or 'без username'}\n"
         response += f"🎯 {q['activity'][:30]}...\n"
+        response += f"📍 {q['region'][:30]}...\n"
+        response += f"💰 {q['budget'][:30]}...\n"
         response += f"⏰ {date_str}\n\n"
     
     await message.answer(response, parse_mode=ParseMode.HTML)
 
 @dp.message(F.text == "📤 Отправить выгрузку")
 async def start_send_export(message: types.Message, state: FSMContext):
-    """Начало отправки выгрузки пользователю - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Начало отправки выгрузки пользователю"""
     if not ADMIN_ID or message.from_user.id != ADMIN_ID:
         await message.answer("⛔ Доступ запрещен", parse_mode=ParseMode.HTML)
         return
@@ -1881,7 +2161,7 @@ async def process_export_user_id(message: types.Message, state: FSMContext):
 
 @dp.message(SendExport.waiting_for_export_file)
 async def process_export_file(message: types.Message, state: FSMContext):
-    """Обработка файла выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ"""
+    """Обработка файла выгрузки"""
     if message.text == "❌ Отмена":
         await state.clear()
         await message.answer("❌ Отправка выгрузки отменена", reply_markup=get_admin_keyboard(), parse_mode=ParseMode.HTML)
@@ -1994,7 +2274,7 @@ async def process_export_file(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data.startswith("confirm_export_"))
 async def handle_confirm_export(callback: types.CallbackQuery):
-    """Подтверждение отправки выгрузки - ИСПРАВЛЕННАЯ ВЕРСИЯ С BufferedInputFile"""
+    """Подтверждение отправки выгрузки - с проверкой контактов"""
     if not ADMIN_ID or callback.from_user.id != ADMIN_ID:
         await callback.answer("⛔ Доступ запрещен", show_alert=True)
         return
@@ -2009,75 +2289,25 @@ async def handle_confirm_export(callback: types.CallbackQuery):
     
     try:
         user_id = export['user_id']
-        file_path = export['file_path']
-        file_name = export['file_name']
         
-        if not user_id:
-            await callback.answer("❌ ID пользователя не найден", show_alert=True)
-            return
+        # Проверяем, есть ли у пользователя полная анкета с контактами
+        conn = sqlite3.connect("tenders.db")
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
         
-        user = db.get_user_by_id(user_id)
-        if not user:
-            await callback.answer("❌ Пользователь не найден", show_alert=True)
-            return
+        cursor.execute('''
+        SELECT full_name, phone, email, company_name 
+        FROM questionnaires 
+        WHERE user_id = ? AND status = 'complete'
+        LIMIT 1
+        ''', (user_id,))
         
-        try:
-            # Если есть файл, отправляем его пользователю
-            if file_path and os.path.exists(file_path):
-                # Читаем файл как бинарный
-                with open(file_path, 'rb') as f:
-                    file_data = f.read()
-                
-                # Создаем BufferedInputFile
-                input_file = BufferedInputFile(
-                    file_data,
-                    filename=file_name or "Выгрузка_тендеров.pdf"
-                )
-                
-                await bot.send_document(
-                    user_id,
-                    document=input_file,
-                    caption=(
-                        f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                        f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                        f"<i>Выгрузка успешно подготовлена и отправлена. "
-                        f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'</i>"
-                    ),
-                    reply_markup=get_export_notification_keyboard(),
-                    parse_mode=ParseMode.HTML
-                )
-                
-                logger.info(f"✅ Файл выгрузки отправлен пользователю {user_id}: {file_path}")
-                
-                # УДАЛЕНО: Убрал дублирующее уведомление
-                # await send_export_notification_to_user(user_id, export_id)
-                
-            else:
-                # Отправляем сообщение без файла
-                await bot.send_message(
-                    user_id,
-                    f"📨 <b>Ваша выгрузка тендеров готова!</b>\n\n"
-                    f"📅 <b>Дата отправки:</b> {datetime.now().strftime('%d.%m.%Y %H:%M')}\n\n"
-                    f"<i>Выгрузка была успешно подготовлена. "
-                    f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'.</i>",
-                    reply_markup=get_export_notification_keyboard(),
-                    parse_mode=ParseMode.HTML
-                )
-                logger.info(f"✅ Уведомление о выгрузке отправлено пользователю {user_id} (без файла)")
-                
-                # УДАЛЕНО: Убрал дублирующее уведомление
-                # await send_export_notification_to_user(user_id, export_id)
-            
-            # Отмечаем выгрузку как завершенную
-            db.mark_export_completed(export_id, callback.from_user.first_name)
-            
-            # Очищаем файл если он был
-            if file_path and os.path.exists(file_path):
-                try:
-                    os.remove(file_path)
-                    logger.info(f"✅ Временный файл удален: {file_path}")
-                except Exception as e:
-                    logger.error(f"Не удалось удалить временный файл {file_path}: {e}")
+        full_questionnaire = cursor.fetchone()
+        conn.close()
+        
+        if full_questionnaire and full_questionnaire['phone'] and full_questionnaire['email']:
+            # Если контакты есть, отправляем выгрузку сразу
+            await send_export_to_user(export_id, export)
             
             await callback.message.edit_text(
                 callback.message.text + "\n\n✅ <b>ВЫГРУЗКА ОТПРАВЛЕНА ПОЛЬЗОВАТЕЛЮ</b>",
@@ -2085,49 +2315,40 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 parse_mode=ParseMode.HTML
             )
             
-            user_name = f"{export['first_name']} {export['last_name'] or ''}".strip()
-            
             await callback.message.answer(
                 f"✅ <b>Выгрузка #{export_id} успешно отправлена пользователю</b>\n\n"
-                f"👤 Пользователь: {user_name}\n"
+                f"👤 Пользователь: {export['first_name']} {export['last_name'] or ''}\n"
                 f"📱 Username: @{export['username'] or 'без username'}\n"
                 f"🆔 Telegram ID: {user_id}\n"
-                f"{'📄 Файл: ' + file_name if file_name else '📝 Без файла'}\n\n"
-                f"<i>Пользователь получил уведомление о новой выгрузке. "
-                f"Через 1 час он получит follow-up сообщение.</i>",
+                f"{'📄 Файл: ' + export['file_name'] if export['file_name'] else '📝 Без файла'}\n\n"
+                f"<i>Пользователь получил уведомление о новой выгрузке.</i>",
                 parse_mode=ParseMode.HTML
             )
             
             logger.info(f"✅ Выгрузка #{export_id} отправлена пользователю {user_id}")
+        else:
+            # Если контактов нет, отправляем запрос на контакты
+            await send_contacts_request(user_id, export_id, export)
             
-        except Exception as e:
-            logger.error(f"❌ Ошибка отправки выгрузки пользователю {user_id}: {e}")
-            
-            # Пытаемся отправить хотя бы уведомление об ошибке админу
-            try:
-                await callback.message.answer(
-                    f"❌ <b>Ошибка при отправке выгрузки #{export_id}</b>\n\n"
-                    f"👤 Пользователь: {export['first_name']} {export['last_name'] or ''}\n"
-                    f"🆔 Telegram ID: {user_id}\n"
-                    f"Ошибка: {str(e)[:200]}\n\n"
-                    f"<i>Возможно, пользователь заблокировал бота или возникла техническая ошибка.</i>",
-                    parse_mode=ParseMode.HTML
-                )
-            except:
-                pass
-            
-            await callback.answer(f"❌ Ошибка отправки: {str(e)[:100]}", show_alert=True)
-            
-    except Exception as e:
-        logger.error(f"❌ Общая ошибка в handle_confirm_export: {e}")
-        try:
-            await callback.message.answer(
-                f"❌ <b>Критическая ошибка при отправке выгрузки #{export_id}</b>\n\n"
-                f"Ошибка: {str(e)[:200]}",
+            await callback.message.edit_text(
+                callback.message.text + "\n\n📨 <b>ЗАПРОС КОНТАКТОВ ОТПРАВЛЕН</b>",
+                reply_markup=None,
                 parse_mode=ParseMode.HTML
             )
-        except:
-            pass
+            
+            await callback.message.answer(
+                f"📨 <b>Запрос контактов отправлен пользователю</b>\n\n"
+                f"👤 Пользователь ID: {user_id}\n"
+                f"📱 Username: @{export['username'] or 'без username'}\n"
+                f"🆔 Выгрузка ID: {export_id}\n\n"
+                f"<i>Пользователь получит сообщение с предложением заполнить контакты для получения выгрузки.</i>",
+                parse_mode=ParseMode.HTML
+            )
+            
+        await callback.answer()
+        
+    except Exception as e:
+        logger.error(f"❌ Ошибка в handle_confirm_export: {e}")
         await callback.answer(f"❌ Ошибка: {str(e)[:100]}", show_alert=True)
 
 @dp.callback_query(F.data.startswith("cancel_export_"))
@@ -2170,12 +2391,17 @@ async def show_statistics(message: types.Message):
     
     stats = db.get_statistics(14)
     
+    # Получаем количество частичных и полных анкет
+    partial = len(db.get_partial_questionnaires())
+    complete = len(db.get_complete_questionnaires())
+    
     response = f"""
 📊 <b>Статистика за 2 недели</b>
 
 👥 <b>Пользователи:</b>
 • Новых пользователей: {stats['new_users']}
-• Новых анкет: {stats['new_questionnaires']}
+• Частичных анкет: {partial}
+• Полных анкет: {complete}
 • С подпиской: {stats['subscribed_users']}
 • Без подписки: {stats['unsubscribed_users']}
 
@@ -3190,7 +3416,7 @@ async def switch_to_user_mode(message: types.Message, state: FSMContext):
         parse_mode=ParseMode.HTML
     )
 
-# =========== ЗАПОЛНЕНИЕ АНКЕТЫ (НОВЫЙ ПОРЯДОК) ===========
+# =========== ЗАПОЛНЕНИЕ АНКЕТЫ (ПЕРВАЯ ЧАСТЬ - 1-4 ВОПРОСЫ) ===========
 @dp.message(Questionnaire.waiting_for_activity)
 async def process_activity(message: types.Message, state: FSMContext):
     """Обработка сферы деятельности (первый вопрос)"""
@@ -3229,235 +3455,150 @@ async def process_budget(message: types.Message, state: FSMContext):
 
 @dp.message(Questionnaire.waiting_for_keywords)
 async def process_keywords(message: types.Message, state: FSMContext):
-    """Обработка ключевых слов"""
-    await state.update_data(keywords=message.text.strip())
+    """Обработка ключевых слов и завершение первой части анкеты"""
+    user_data = await state.get_data()
+    user_data['keywords'] = message.text.strip()
+    
+    user_id = message.from_user.id
+    username = message.from_user.username or "без username"
+    
+    # Сохраняем первую часть анкеты (только 1-4 вопросы)
+    questionnaire_id = db.save_questionnaire_partial(user_id, user_data)
+    
+    # Отправляем админу уведомление о первой части анкеты
+    await send_partial_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
+    
     await message.answer(
-        "✅ <b>Ключевые слова сохранены</b>\n\n"
-        "Теперь введите <b>полное название вашей компании</b>:",
+        "🎉 <b>Анкета отправлена менеджеру для анализа!</b>\n\n"
+        "✅ <b>Ваши данные (1-4 пункты) сохранены:</b>\n"
+        f"• Сфера: {user_data['activity'][:50]}\n"
+        f"• Регионы: {user_data['region'][:50]}\n"
+        f"• Бюджет: {user_data['budget'][:50]}\n"
+        f"• Ключевые слова: {user_data['keywords'][:50]}\n\n"
+        "<i>Мы проанализируем вашу анкету и вернемся с выгрузкой тендеров.</i>\n"
+        "<i>Обычно это занимает от 1 до 24 часов в рабочее время.</i>",
+        reply_markup=get_main_keyboard(),
         parse_mode=ParseMode.HTML
     )
-    await state.set_state(Questionnaire.waiting_for_company)
+    
+    await state.clear()
 
-@dp.message(Questionnaire.waiting_for_company)
-async def process_company(message: types.Message, state: FSMContext):
-    """Обработка названия компании"""
+# =========== ОБРАБОТЧИК ЗАПОЛНЕНИЯ КОНТАКТОВ ДЛЯ ВЫГРУЗКИ ===========
+@dp.callback_query(F.data.startswith("fill_contacts_"))
+async def handle_fill_contacts(callback: types.CallbackQuery, state: FSMContext):
+    """Начало заполнения контактов для получения выгрузки"""
+    export_id = int(callback.data.split("_")[2])
+    
+    await state.update_data(export_id=export_id)
+    await state.set_state(ExportContacts.waiting_for_company)
+    
+    await callback.message.edit_text(
+        callback.message.text + "\n\n📝 <b>Заполните оставшиеся данные:</b>",
+        parse_mode=ParseMode.HTML
+    )
+    
+    await callback.message.answer(
+        "🏢 Введите <b>полное название вашей компании</b>:",
+        reply_markup=get_cancel_keyboard(),
+        parse_mode=ParseMode.HTML
+    )
+    
+    await callback.answer()
+
+@dp.message(ExportContacts.waiting_for_company)
+async def process_export_company(message: types.Message, state: FSMContext):
+    """Обработка названия компании для выгрузки"""
     await state.update_data(company_name=message.text.strip())
     await message.answer(
         "✅ <b>Компания сохранена</b>\n\n"
         "Введите ваше <b>ФИО полностью</b>:",
         parse_mode=ParseMode.HTML
     )
-    await state.set_state(Questionnaire.waiting_for_name)
+    await state.set_state(ExportContacts.waiting_for_name)
 
-@dp.message(Questionnaire.waiting_for_name)
-async def process_name(message: types.Message, state: FSMContext):
-    """Обработка ФИО"""
+@dp.message(ExportContacts.waiting_for_name)
+async def process_export_name(message: types.Message, state: FSMContext):
+    """Обработка ФИО для выгрузки"""
     await state.update_data(full_name=message.text.strip())
     await message.answer(
         "✅ <b>ФИО сохранено</b>\n\n"
-        "Теперь укажите ваш <b>телефон для связи</b>:\n"
-        "<i>Вы можете поделиться телефоном через кнопку или ввести вручную</i>",
-        reply_markup=get_phone_keyboard(),
+        "Теперь укажите ваш <b>телефон для связи</b>:",
         parse_mode=ParseMode.HTML
     )
-    await state.set_state(Questionnaire.waiting_for_phone)
+    await state.set_state(ExportContacts.waiting_for_phone)
 
-@dp.message(Questionnaire.waiting_for_phone)
-async def process_phone(message: types.Message, state: FSMContext):
-    """Обработка телефона с кнопкой "Поделиться телефоном" """
-    phone = None
+@dp.message(ExportContacts.waiting_for_phone)
+async def process_export_phone(message: types.Message, state: FSMContext):
+    """Обработка телефона для выгрузки"""
+    phone = message.text.strip()
     
-    # Если пользователь нажал "Ввести вручную"
-    if message.text == "📝 Ввести вручную":
-        await message.answer(
-            "📝 <b>Введите ваш телефон вручную:</b>\n"
-            "<i>Пример: +7 (999) 123-45-67 или 89991234567</i>",
-            reply_markup=get_cancel_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-        return  # Остаемся в том же состоянии, ждем ручной ввод
-    
-    # Если пользователь отправил контакт
-    elif message.contact:
+    if message.contact:
         phone = message.contact.phone_number
     
-    # Если пользователь ввел телефон вручную
-    elif message.text and message.text != "❌ Отмена":
-        phone = message.text.strip()
-    
-    # Если нажал отмену
-    elif message.text == "❌ Отмена":
-        await state.clear()
-        await message.answer(
-            "❌ Заполнение анкеты отменено.\n\n"
-            "Вы можете начать заполнение заново в любое время.",
-            reply_markup=get_main_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-        return
-    
-    # Если телефон не получен
-    if not phone:
-        await message.answer(
-            "❌ Пожалуйста, укажите ваш телефон.\n"
-            "Используйте кнопку '📱 Поделиться телефоном' или введите вручную.",
-            reply_markup=get_phone_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
-        return
-    
     await state.update_data(phone=phone)
-    
     await message.answer(
         "✅ <b>Телефон сохранен</b>\n\n"
         "Введите ваш <b>email для отправки тендеров</b>:",
-        reply_markup=get_cancel_keyboard(),
         parse_mode=ParseMode.HTML
     )
-    await state.set_state(Questionnaire.waiting_for_email)
+    await state.set_state(ExportContacts.waiting_for_email)
 
-@dp.message(Questionnaire.waiting_for_email)
-async def process_email(message: types.Message, state: FSMContext):
-    """Завершение анкеты - СОЗДАНИЕ И ОТПРАВКА ФАЙЛА АНКЕТЫ ПОЛЬЗОВАТЕЛЮ"""
-    if message.text == "❌ Отмена":
-        await state.clear()
+@dp.message(ExportContacts.waiting_for_email)
+async def process_export_email(message: types.Message, state: FSMContext):
+    """Завершение заполнения контактов и отправка выгрузки"""
+    data = await state.get_data()
+    data['email'] = message.text.strip()
+    
+    export_id = data.get('export_id')
+    user_id = message.from_user.id
+    
+    # Сохраняем полную анкету (обновляем частичную)
+    db.update_partial_to_complete(user_id, data)
+    
+    # Получаем данные о выгрузке
+    export = db.get_export_by_id(export_id)
+    
+    if export and export['file_path'] and os.path.exists(export['file_path']):
+        # Отправляем файл пользователю
+        await send_export_file_to_user(user_id, export['file_path'], export['file_name'], export_id)
+        
         await message.answer(
-            "❌ Заполнение анкеты отменено.\n\n"
-            "Вы можете начать заполнение заново в любое время.",
+            "🎉 <b>Спасибо! Выгрузка тендеров отправлена!</b>\n\n"
+            "✅ <b>Ваши контакты сохранены:</b>\n"
+            f"• Компания: {data.get('company_name')}\n"
+            f"• ФИО: {data.get('full_name')}\n"
+            f"• Телефон: {data.get('phone')}\n"
+            f"• Email: {data.get('email')}\n\n"
+            "<i>Файл с выгрузкой тендеров отправлен вам выше.</i>\n"
+            "<i>Вы также можете найти его в разделе '📊 Мои выгрузки'</i>",
             reply_markup=get_main_keyboard(),
             parse_mode=ParseMode.HTML
         )
-        return
-    
-    user_data = await state.get_data()
-    user_data['email'] = message.text.strip()
-    user_id = message.from_user.id
-    username = message.from_user.username or "без username"
-    
-    try:
-        anketa_path = create_filled_anketa(user_data)
         
-        if anketa_path:
+        # Отмечаем запрос контактов как выполненный
+        db.mark_contact_request_completed(export_id)
+        
+        # Уведомляем админа
+        if ADMIN_ID:
             try:
-                # Используем BufferedInputFile для отправки файла
-                with open(anketa_path, 'rb') as f:
-                    file_data = f.read()
-                
-                input_file = BufferedInputFile(
-                    file_data,
-                    filename=f"Анкета_Тритика_{user_data.get('company_name', 'Компания')}.docx"
-                )
-                
-                await message.answer_document(
-                    document=input_file,
-                    caption=(
-                        "📄 <b>Ваша анкета заполнена и сохранена!</b>\n\n"
-                        "✅ <b>Вы можете:</b>\n"
-                        "1. Сохранить этот файл на компьютере\n"
-                        "2. Отправить его менеджеру через кнопку '📤 Написать менеджеру'\n"
-                        "3. Или мы обработаем ее автоматически\n\n"
-                        "<i>Анкета также отправлена менеджеру для обработки.</i>"
-                    ),
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"✅ <b>Пользователь заполнил контакты и получил выгрузку</b>\n\n"
+                    f"👤 Пользователь ID: {user_id}\n"
+                    f"📱 Username: @{message.from_user.username or 'без username'}\n"
+                    f"🏢 Компания: {data.get('company_name')}\n"
+                    f"📞 Телефон: {data.get('phone')}\n"
+                    f"📧 Email: {data.get('email')}\n"
+                    f"📄 Выгрузка ID: {export_id}\n\n"
+                    f"<i>Файл отправлен пользователю.</i>",
                     parse_mode=ParseMode.HTML
                 )
-                
-                questionnaire_id = db.save_questionnaire(user_id, user_data, anketa_path)
-                
-                if questionnaire_id:
-                    # Создаем запись о выгрузке БЕЗ файла
-                    export_id = db.create_tender_export_without_file(user_id)
-                    
-                    if db.is_working_hours():
-                        time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
-                    else:
-                        next_time = db.get_next_working_time()
-                        time_info = f"⏱️ <b>Запрос получен в нерабочее время. Вышлю с 9:00 до 17:00 {next_time.strftime('%d.%m.%Y')}.</b>"
-                    
-                    await message.answer(
-                        f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
-                        f"{time_info}\n\n"
-                        f"<i>Заполненная анкета отправлена вам выше. Вы можете отправить ее менеджеру для ускорения обработки.</i>",
-                        reply_markup=get_main_keyboard(),
-                        parse_mode=ParseMode.HTML
-                    )
-                    
-                    await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username, anketa_path)
-                    
-                    logger.info(f"✅ Анкета #{questionnaire_id} сохранена, файл создан и отправлен администратору")
-                    
-                    try:
-                        os.remove(anketa_path)
-                        logger.info(f"Временный файл анкеты удален: {anketa_path}")
-                    except Exception as e:
-                        logger.error(f"Ошибка удаления временного файла: {e}")
-                else:
-                    await message.answer(
-                        "❌ <b>Ошибка при сохранении анкеты в базе данных</b>\n\n"
-                        "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
-                        reply_markup=get_main_keyboard(),
-                        parse_mode=ParseMode.HTML
-                    )
-                
             except Exception as e:
-                logger.error(f"❌ Ошибка отправки файла анкеты: {e}")
-                questionnaire_id = db.save_questionnaire(user_id, user_data)
-                
-                if questionnaire_id:
-                    # Создаем запись о выгрузке БЕЗ файла
-                    export_id = db.create_tender_export_without_file(user_id)
-                    
-                    if db.is_working_hours():
-                        time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
-                    else:
-                        next_time = db.get_next_working_time()
-                        time_info = f"⏱️ <b>Запрос получен в нерабочее время. Вышлю с 9:00 до 17:00 {next_time.strftime('%d.%m.%Y')}.</b>"
-                    
-                    await message.answer(
-                        f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
-                        f"{time_info}\n\n"
-                        f"<i>Данные сохранены и отправлены менеджеру.</i>",
-                        reply_markup=get_main_keyboard(),
-                        parse_mode=ParseMode.HTML
-                    )
-                    
-                    await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
-                    logger.info(f"✅ Анкета #{questionnaire_id} сохранена (без файла) и отправлена администратору")
-        else:
-            questionnaire_id = db.save_questionnaire(user_id, user_data)
-            
-            if questionnaire_id:
-                # Создаем запись о выгрузке БЕЗ файла
-                export_id = db.create_tender_export_without_file(user_id)
-                
-                if db.is_working_hours():
-                    time_info = "⏱️ <b>Сейчас ищу для вас актуальные тендеры. Не пройдет и часа, как я пришлю подборку на почту и (или) в телеграм.</b>"
-                else:
-                    next_time = db.get_next_working_time()
-                    time_info = f"⏱️ <b>Запрос получен в нерабочее время. Вышлю с 9:00 до 17:00 {next_time.strftime('%d.%m.%Y')}.</b>"
-                
-                await message.answer(
-                    f"🎉 <b>Анкета #{questionnaire_id} сохранена!</b>\n\n"
-                    f"{time_info}\n\n"
-                    f"<i>Данные сохранены и отправлены менеджеру.</i>",
-                    reply_markup=get_main_keyboard(),
-                    parse_mode=ParseMode.HTML
-                )
-                
-                await send_questionnaire_to_admin(questionnaire_id, user_id, user_data, username)
-                logger.info(f"✅ Анкета #{questionnaire_id} сохранена (без файла) и отправлена администратору")
-            else:
-                await message.answer(
-                    "❌ <b>Ошибка при сохранении анкеты</b>\n\n"
-                    "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
-                    reply_markup=get_main_keyboard(),
-                    parse_mode=ParseMode.HTML
-                )
-    
-    except Exception as e:
-        logger.error(f"❌ Критическая ошибка при сохранении анкеты: {e}")
+                logger.error(f"Не удалось уведомить админа: {e}")
+    else:
         await message.answer(
-            "❌ <b>Произошла критическая ошибка при сохранении анкеты</b>\n\n"
-            "Пожалуйста, попробуйте еще раз позже или свяжитесь с поддержкой.",
+            "✅ <b>Ваши контакты сохранены!</b>\n\n"
+            "<i>Выгрузка будет отправлена вам в ближайшее время менеджером.</i>",
             reply_markup=get_main_keyboard(),
             parse_mode=ParseMode.HTML
         )
@@ -3547,7 +3688,8 @@ async def main():
     print("\n🔄 Ожидание сообщений...")
     print(f"🌐 Health check активен на порту {PORT}\n")
     print("⏰ Follow-up система активна (проверка каждые 5 минут)")
-    print("📨 Система уведомлений о новых выгрузках активна")
+    print("📨 Система запроса контактов для выгрузок активна")
+    print("📱 Кнопка 'Поделиться телефоном' добавлена в главное меню")
     
     # Запускаем polling бота
     try:
