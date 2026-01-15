@@ -1033,6 +1033,44 @@ class Database:
         
         return export_id
 
+    def has_complete_questionnaire(self, user_id: int):
+        """Проверка, есть ли у пользователя полная анкета с контактами"""
+        conn = sqlite3.connect(self.db_name)
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT COUNT(*) as count 
+        FROM questionnaires 
+        WHERE user_id = ? AND status = 'complete'
+        AND full_name IS NOT NULL 
+        AND phone IS NOT NULL 
+        AND email IS NOT NULL
+        ''', (user_id,))
+        
+        result = cursor.fetchone()
+        conn.close()
+        
+        return result[0] > 0 if result else False
+
+    def get_last_complete_questionnaire(self, user_id: int):
+        """Получение последней полной анкеты пользователя"""
+        conn = sqlite3.connect(self.db_name)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute('''
+        SELECT * 
+        FROM questionnaires 
+        WHERE user_id = ? AND status = 'complete'
+        ORDER BY created_at DESC
+        LIMIT 1
+        ''', (user_id,))
+        
+        questionnaire = cursor.fetchone()
+        conn.close()
+        
+        return questionnaire
+
 db = Database()
 
 # =========== HTTP ОБРАБОТЧИКИ ДЛЯ RAILWAY ===========
@@ -1521,6 +1559,24 @@ async def send_contacts_request(user_id: int, export_id: int, export_data: dict)
         )
         
         logger.info(f"Запрос контактов отправлен пользователю {user_id} для выгрузки #{export_id}")
+        
+        # Уведомляем администратора о запросе контактов
+        if ADMIN_ID:
+            try:
+                user = db.get_user_by_id(user_id)
+                user_name = f"{user['first_name']} {user['last_name'] or ''}" if user else f"ID: {user_id}"
+                
+                await bot.send_message(
+                    ADMIN_ID,
+                    f"📨 <b>Запрос контактов отправлен пользователю</b>\n\n"
+                    f"👤 Пользователь: {user_name}\n"
+                    f"🆔 ID: {user_id}\n"
+                    f"📋 Выгрузка ID: {export_id}\n\n"
+                    f"<i>Пользователю отправлен запрос на заполнение контактов для получения выгрузки.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.error(f"Ошибка уведомления администратора: {e}")
         
     except Exception as e:
         logger.error(f"Ошибка отправки запроса контактов пользователю {user_id}: {e}")
@@ -2291,21 +2347,7 @@ async def handle_confirm_export(callback: types.CallbackQuery):
         user_id = export['user_id']
         
         # Проверяем, есть ли у пользователя полная анкета с контактами
-        conn = sqlite3.connect("tenders.db")
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-        SELECT full_name, phone, email, company_name 
-        FROM questionnaires 
-        WHERE user_id = ? AND status = 'complete'
-        LIMIT 1
-        ''', (user_id,))
-        
-        full_questionnaire = cursor.fetchone()
-        conn.close()
-        
-        if full_questionnaire and full_questionnaire['phone'] and full_questionnaire['email']:
+        if db.has_complete_questionnaire(user_id):
             # Если контакты есть, отправляем выгрузку сразу
             await send_export_to_user(export_id, export)
             
@@ -2341,7 +2383,7 @@ async def handle_confirm_export(callback: types.CallbackQuery):
                 f"👤 Пользователь ID: {user_id}\n"
                 f"📱 Username: @{export['username'] or 'без username'}\n"
                 f"🆔 Выгрузка ID: {export_id}\n\n"
-                f"<i>Пользователь получит сообщение с предложением заполнить контакты для получения выгрузки.</i>",
+                f"<i>Пользователь получил сообщение с предложением заполнить контакты для получения выгрузки.</i>",
                 parse_mode=ParseMode.HTML
             )
             
@@ -3558,22 +3600,40 @@ async def process_export_email(message: types.Message, state: FSMContext):
     # Получаем данные о выгрузке
     export = db.get_export_by_id(export_id)
     
-    if export and export['file_path'] and os.path.exists(export['file_path']):
-        # Отправляем файл пользователю
-        await send_export_file_to_user(user_id, export['file_path'], export['file_name'], export_id)
-        
-        await message.answer(
-            "🎉 <b>Спасибо! Выгрузка тендеров отправлена!</b>\n\n"
-            "✅ <b>Ваши контакты сохранены:</b>\n"
-            f"• Компания: {data.get('company_name')}\n"
-            f"• ФИО: {data.get('full_name')}\n"
-            f"• Телефон: {data.get('phone')}\n"
-            f"• Email: {data.get('email')}\n\n"
-            "<i>Файл с выгрузкой тендеров отправлен вам выше.</i>\n"
-            "<i>Вы также можете найти его в разделе '📊 Мои выгрузки'</i>",
-            reply_markup=get_main_keyboard(),
-            parse_mode=ParseMode.HTML
-        )
+    if export:
+        if export['file_path'] and os.path.exists(export['file_path']):
+            # Отправляем файл пользователю
+            await send_export_file_to_user(user_id, export['file_path'], export['file_name'], export_id)
+            
+            await message.answer(
+                "🎉 <b>Спасибо! Выгрузка тендеров отправлена!</b>\n\n"
+                "✅ <b>Ваши контакты сохранены:</b>\n"
+                f"• Компания: {data.get('company_name')}\n"
+                f"• ФИО: {data.get('full_name')}\n"
+                f"• Телефон: {data.get('phone')}\n"
+                f"• Email: {data.get('email')}\n\n"
+                "<i>Файл с выгрузкой тендеров отправлен вам выше.</i>\n"
+                "<i>Вы также можете найти его в разделе '📊 Мои выгрузки'</i>",
+                reply_markup=get_main_keyboard(),
+                parse_mode=ParseMode.HTML
+            )
+        else:
+            # Если файла нет, отправляем уведомление
+            await bot.send_message(
+                user_id,
+                f"📨 <b>Ваша выгрузка тендеров #{export_id} готова!</b>\n\n"
+                f"✅ <b>Ваши контакты сохранены:</b>\n"
+                f"• Компания: {data.get('company_name')}\n"
+                f"• ФИО: {data.get('full_name')}\n"
+                f"• Телефон: {data.get('phone')}\n"
+                f"• Email: {data.get('email')}\n\n"
+                "<i>Выгрузка была успешно подготовлена. "
+                f"Вы можете посмотреть ее в разделе '📊 Мои выгрузки'.</i>",
+                parse_mode=ParseMode.HTML
+            )
+            
+            # Обновляем статус выгрузки
+            db.mark_export_completed(export_id, "Автоматическая отправка")
         
         # Отмечаем запрос контактов как выполненный
         db.mark_contact_request_completed(export_id)
@@ -3590,7 +3650,7 @@ async def process_export_email(message: types.Message, state: FSMContext):
                     f"📞 Телефон: {data.get('phone')}\n"
                     f"📧 Email: {data.get('email')}\n"
                     f"📄 Выгрузка ID: {export_id}\n\n"
-                    f"<i>Файл отправлен пользователю.</i>",
+                    f"<i>Выгрузка отправлена пользователю.</i>",
                     parse_mode=ParseMode.HTML
                 )
             except Exception as e:
