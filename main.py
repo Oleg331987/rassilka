@@ -1532,15 +1532,23 @@ async def schedule_follow_ups():
 async def send_contacts_request(user_id: int, export_id: int, export_data: dict):
     """Отправка запроса на контакты пользователю"""
     try:
+        # Получаем частичную анкету пользователя для данных
+        questionnaires = db.get_partial_questionnaires()
+        user_questionnaire = None
+        for q in questionnaires:
+            if q['user_id'] == user_id:
+                user_questionnaire = q
+                break
+        
         message_text = f"""
 📋 <b>Мы проанализировали вашу анкету!</b>
 
 ✅ <b>Подготовили для Вас список тендеров</b>
 
 🎯 <b>По вашим критериям:</b>
-• Сфера: {export_data.get('activity', 'Ваша сфера деятельности')}
-• Регионы: {export_data.get('region', 'Ваши регионы')}
-• Бюджет: {export_data.get('budget', 'Ваш бюджет')}
+• Сфера: {user_questionnaire['activity'] if user_questionnaire else 'Ваша сфера деятельности'}
+• Регионы: {user_questionnaire['region'] if user_questionnaire else 'Ваши регионы'}
+• Бюджет: {user_questionnaire['budget'] if user_questionnaire else 'Ваш бюджет'}
 
 📄 <b>Для получения выгрузки тендеров оставьте свои контакты:</b>
 
@@ -1558,7 +1566,7 @@ async def send_contacts_request(user_id: int, export_id: int, export_data: dict)
             parse_mode=ParseMode.HTML
         )
         
-        logger.info(f"Запрос контактов отправлен пользователю {user_id} для выгрузки #{export_id}")
+        logger.info(f"✅ Запрос контактов отправлен пользователю {user_id} для выгрузки #{export_id}")
         
         # Уведомляем администратора о запросе контактов
         if ADMIN_ID:
@@ -1578,8 +1586,11 @@ async def send_contacts_request(user_id: int, export_id: int, export_data: dict)
             except Exception as e:
                 logger.error(f"Ошибка уведомления администратора: {e}")
         
+        return True
+        
     except Exception as e:
-        logger.error(f"Ошибка отправки запроса контактов пользователю {user_id}: {e}")
+        logger.error(f"❌ Ошибка отправки запроса контактов пользователю {user_id}: {e}")
+        return False
 
 # =========== ФУНКЦИЯ ОТПРАВКИ ВЫГРУЗКИ ПОЛЬЗОВАТЕЛЮ ===========
 async def send_export_to_user(export_id: int, export_data: dict):
@@ -2370,23 +2381,39 @@ async def handle_confirm_export(callback: types.CallbackQuery):
             logger.info(f"✅ Выгрузка #{export_id} отправлена пользователю {user_id}")
         else:
             # Если контактов нет, отправляем запрос на контакты
-            await send_contacts_request(user_id, export_id, export)
+            success = await send_contacts_request(user_id, export_id, export)
             
-            await callback.message.edit_text(
-                callback.message.text + "\n\n📨 <b>ЗАПРОС КОНТАКТОВ ОТПРАВЛЕН</b>",
-                reply_markup=None,
-                parse_mode=ParseMode.HTML
-            )
-            
-            await callback.message.answer(
-                f"📨 <b>Запрос контактов отправлен пользователю</b>\n\n"
-                f"👤 Пользователь ID: {user_id}\n"
-                f"📱 Username: @{export['username'] or 'без username'}\n"
-                f"🆔 Выгрузка ID: {export_id}\n\n"
-                f"<i>Пользователь получил сообщение с предложением заполнить контакты для получения выгрузки.</i>",
-                parse_mode=ParseMode.HTML
-            )
-            
+            if success:
+                await callback.message.edit_text(
+                    callback.message.text + "\n\n📨 <b>ЗАПРОС КОНТАКТОВ ОТПРАВЛЕН</b>",
+                    reply_markup=None,
+                    parse_mode=ParseMode.HTML
+                )
+                
+                await callback.message.answer(
+                    f"📨 <b>Запрос контактов отправлен пользователю</b>\n\n"
+                    f"👤 Пользователь ID: {user_id}\n"
+                    f"📱 Username: @{export['username'] or 'без username'}\n"
+                    f"🆔 Выгрузка ID: {export_id}\n\n"
+                    f"<i>Пользователь получил сообщение с предложением заполнить контакты для получения выгрузки.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+            else:
+                await callback.message.edit_text(
+                    callback.message.text + "\n\n❌ <b>ОШИБКА ОТПРАВКИ ЗАПРОСА КОНТАКТОВ</b>",
+                    reply_markup=None,
+                    parse_mode=ParseMode.HTML
+                )
+                
+                await callback.message.answer(
+                    f"❌ <b>Не удалось отправить запрос контактов пользователю</b>\n\n"
+                    f"👤 Пользователь ID: {user_id}\n"
+                    f"📱 Username: @{export['username'] or 'без username'}\n"
+                    f"🆔 Выгрузка ID: {export_id}\n\n"
+                    f"<i>Возможно, пользователь заблокировал бота или произошла ошибка отправки.</i>",
+                    parse_mode=ParseMode.HTML
+                )
+        
         await callback.answer()
         
     except Exception as e:
