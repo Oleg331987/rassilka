@@ -1099,11 +1099,10 @@ async def status_check(request):
 
 # =========== КЛАВИАТУРЫ ===========
 def get_main_keyboard():
-    """Главная клавиатура"""
+    """Главная клавиатура (УБРАНА КНОПКА ПОДЕЛИТЬСЯ ТЕЛЕФОНОМ)"""
     return ReplyKeyboardMarkup(
         keyboard=[
             [KeyboardButton(text="📝 Заполнить анкету онлайн")],
-            [KeyboardButton(text="📱 Поделиться телефоном", request_contact=True)],
             [KeyboardButton(text="📥 Скачать анкету в Word")],
             [KeyboardButton(text="📤 Написать менеджеру")],
             [KeyboardButton(text="📊 Мои выгрузки")],
@@ -1119,6 +1118,16 @@ def get_phone_keyboard():
         keyboard=[
             [KeyboardButton(text="📱 Поделиться телефоном", request_contact=True)],
             [KeyboardButton(text="📝 Ввести вручную")],
+            [KeyboardButton(text="❌ Отмена")]
+        ],
+        resize_keyboard=True
+    )
+
+def get_phone_keyboard_simple():
+    """Упрощенная клавиатура для ввода телефона (только кнопка поделиться и отмена)"""
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text="📱 Поделиться телефоном", request_contact=True)],
             [KeyboardButton(text="❌ Отмена")]
         ],
         resize_keyboard=True
@@ -3591,23 +3600,45 @@ async def process_export_name(message: types.Message, state: FSMContext):
     await state.update_data(full_name=message.text.strip())
     await message.answer(
         "✅ <b>ФИО сохранено</b>\n\n"
-        "Теперь укажите ваш <b>телефон для связи</b>:",
+        "Теперь укажите ваш <b>телефон для связи</b>.\n\n"
+        "Вы можете нажать кнопку ниже, чтобы поделиться телефоном, или ввести его вручную:",
+        reply_markup=get_phone_keyboard_simple(),
         parse_mode=ParseMode.HTML
     )
     await state.set_state(ExportContacts.waiting_for_phone)
 
 @dp.message(ExportContacts.waiting_for_phone)
 async def process_export_phone(message: types.Message, state: FSMContext):
-    """Обработка телефона для выгрузки"""
-    phone = message.text.strip()
+    """Обработка телефона для выгрузки с кнопкой поделиться"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer(
+            "❌ Заполнение контактов отменено.",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
+    phone = None
     
     if message.contact:
         phone = message.contact.phone_number
+    elif message.text and message.text != "📱 Поделиться телефоном":
+        phone = message.text.strip()
+    else:
+        await message.answer(
+            "❌ Пожалуйста, укажите ваш телефон для связи.\n\n"
+            "Вы можете нажать кнопку '📱 Поделиться телефоном' или ввести номер вручную.",
+            reply_markup=get_phone_keyboard_simple(),
+            parse_mode=ParseMode.HTML
+        )
+        return
     
     await state.update_data(phone=phone)
     await message.answer(
-        "✅ <b>Телефон сохранен</b>\n\n"
+        f"✅ <b>Телефон сохранен: {phone}</b>\n\n"
         "Введите ваш <b>email для отправки тендеров</b>:",
+        reply_markup=get_cancel_keyboard(),
         parse_mode=ParseMode.HTML
     )
     await state.set_state(ExportContacts.waiting_for_email)
@@ -3615,6 +3646,15 @@ async def process_export_phone(message: types.Message, state: FSMContext):
 @dp.message(ExportContacts.waiting_for_email)
 async def process_export_email(message: types.Message, state: FSMContext):
     """Завершение заполнения контактов и отправка выгрузки"""
+    if message.text == "❌ Отмена":
+        await state.clear()
+        await message.answer(
+            "❌ Заполнение контактов отменено.",
+            reply_markup=get_main_keyboard(),
+            parse_mode=ParseMode.HTML
+        )
+        return
+    
     data = await state.get_data()
     data['email'] = message.text.strip()
     
@@ -3776,7 +3816,8 @@ async def main():
     print(f"🌐 Health check активен на порту {PORT}\n")
     print("⏰ Follow-up система активна (проверка каждые 5 минут)")
     print("📨 Система запроса контактов для выгрузок активна")
-    print("📱 Кнопка 'Поделиться телефоном' добавлена в главное меню")
+    print("📱 Кнопка 'Поделиться телефоном' добавлена во вторую часть анкеты (при запросе контактов)")
+    print("📱 Кнопка 'Поделиться телефоном' удалена из главного меню")
     
     # Запускаем polling бота
     try:
