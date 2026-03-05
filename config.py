@@ -85,7 +85,8 @@ COMPANY_INFO = """ООО "Тритика"
 
 📞 Контакты:
 Телефон: +7 (4922) 223-222
-Email: info@tritica.ru
-Сайт: www.tritica.ru
+Email: info@tritika.ru
+Сайт: www.tritika.ru
 
 🔥 Акция этого месяца: Бесплатный анализ 3-х тендеров для новых клиентов!"""
+
